@@ -1,0 +1,39 @@
+{
+  "name": "mockcloud",
+  "version": "1.2.1",
+  "description": "MockCloud — Free, open-source local AWS emulator. No account. No token. MIT licensed.",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "ui:dev": "cd ui && npm run dev",
+    "ui:build": "cd ui && npm run build"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": {
+    "name": "Pranjal Bareth",
+    "url": "https://github.com/pranjalbareth"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mockcloud/mockcloud"
+  },
+  "homepage": "https://github.com/mockcloud/mockcloud",
+  "bugs": {
+    "url": "https://github.com/mockcloud/mockcloud/issues"
+  },
+  "keywords": [
+    "aws",
+    "aws-emulator",
+    "localstack",
+    "mock",
+    "cloud",
+    "serverless",
+    "testing",
+    "offline"
+  ]
+}

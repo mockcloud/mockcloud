@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+ui/node_modules/
+
+# UI build output (Docker builds this, don't commit)
+ui/dist/
+
+# Environment / secrets
+.env
+.env.*
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+
+# MockCloud runtime data (if any state gets written to disk)
+data/
+*.db

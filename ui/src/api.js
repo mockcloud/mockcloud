@@ -1,0 +1,161 @@
+// api.js — MockCloud internal REST API client
+const BASE = '/mockcloud';
+
+async function req(method, path, body) {
+  const opts = { method, headers: {} };
+  if (body) { opts.body = JSON.stringify(body); opts.headers['Content-Type'] = 'application/json'; }
+  const r = await fetch(BASE + path, opts);
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+    const err = new Error(e.message || e.error || `HTTP ${r.status}`);
+    err.status = r.status;
+    err.body = e;        // expose hint, platform, etc. to callers
+    throw err;
+  }
+  const ct = r.headers.get('content-type') || '';
+  return ct.includes('json') ? r.json() : r.text();
+}
+
+const get = p => req('GET', p);
+const post = (p, b) => req('POST', p, b);
+const del = p => req('DELETE', p);
+
+// Binary file upload — sends raw bytes (not JSON-stringified). The browser
+// fills in Content-Type from the File object's type.
+async function uploadObject(bucket, key, file) {
+  const url = `${BASE}/s3/buckets/${encodeURIComponent(bucket)}/objects?key=${encodeURIComponent(key)}`;
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': file.type || 'application/octet-stream' },
+    body: file,
+  });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+    throw new Error(e.message || e.error || `HTTP ${r.status}`);
+  }
+  return r.json();
+}
+
+export const api = {
+  status: () => get('/status'),
+  trail: () => get('/trail'),
+  clearTrail: () => del('/trail'),
+  reset: (s) => del(s ? `/reset?service=${s}` : '/reset'),
+  export: () => fetch(BASE + '/export').then(r => r.json()),
+
+  s3: {
+    buckets: () => get('/s3/buckets'),
+    create: (n, r) => post('/s3/buckets', { name: n, region: r }),
+    delete: (n) => del(`/s3/buckets/${n}`),
+    objects: (b) => get(`/s3/buckets/${b}/objects`),
+    upload: (b, k, file) => uploadObject(b, k, file),
+    download: (b, k) => `${BASE}/s3/buckets/${encodeURIComponent(b)}/object?key=${encodeURIComponent(k)}`,
+    deleteObject: (b, k) => del(`/s3/buckets/${encodeURIComponent(b)}/object?key=${encodeURIComponent(k)}`),
+  },
+  dynamo: {
+    tables: () => get('/dynamodb/tables'),
+    table: (n) => get(`/dynamodb/tables/${n}`),
+    create: (b) => post('/dynamodb/tables', b),
+    delete: (n) => del(`/dynamodb/tables/${n}`),
+    putItem: (t, i) => post(`/dynamodb/tables/${t}/items`, i),
+    deleteItem: (t, pk) => del(`/dynamodb/tables/${t}/items/${encodeURIComponent(pk)}`),
+  },
+  lambda: {
+    functions: () => get('/lambda/functions'),
+    fn: (n) => get(`/lambda/functions/${n}`),
+    create: (b) => post('/lambda/functions', b),
+    delete: (n) => del(`/lambda/functions/${n}`),
+    invoke: (n, p) => post(`/lambda/functions/${n}/invoke`, p),
+    logs: (n) => get(`/lambda/functions/${n}/logs`),
+  },
+  ec2: {
+    instances: () => get('/ec2/instances'),
+    launch: (b) => post('/ec2/instances', b),
+    action: (id, a) => post(`/ec2/instances/${id}/action`, { action: a }),
+    terminate: (id) => del(`/ec2/instances/${id}`),
+    setMode: (mode) => post('/ec2/mode', { mode }),
+    dockerStatus: () => get('/ec2/docker-status'),
+  },
+  sns: {
+    topics: () => get('/sns/topics'),
+    create: (n) => post('/sns/topics', { name: n }),
+    delete: (a) => del(`/sns/topics/${encodeURIComponent(a)}`),
+    publish: (n, m) => post(`/sns/topics/${n}/publish`, { message: m }),
+  },
+  sqs: {
+    queues: () => get('/sqs/queues'),
+    create: (n) => post('/sqs/queues', { name: n }),
+    delete: (n) => del(`/sqs/queues/${n}`),
+    send: (n, b) => post(`/sqs/queues/${n}/send`, { body: b }),
+    messages: (n, limit = 50) => get(`/sqs/queues/${n}/messages?limit=${limit}`),
+    receive: (n, max = 1) => post(`/sqs/queues/${n}/receive`, { max }),
+    deleteMessage: (n, handle) => post(`/sqs/queues/${n}/delete-message`, { receiptHandle: handle }),
+    purge: (n) => post(`/sqs/queues/${n}/purge`, {}),
+  },
+  secrets: {
+    list: () => get('/secrets'),
+    get: (n) => get(`/secrets/${encodeURIComponent(n)}`),
+    create: (b) => post('/secrets', b),
+    delete: (n) => del(`/secrets/${encodeURIComponent(n)}`),
+  },
+  iam: {
+    users: () => get('/iam/users'),
+    createUser: (b) => post('/iam/users', b),
+    deleteUser: (n) => del(`/iam/users/${n}`),
+    roles: () => get('/iam/roles'),
+    createRole: (b) => post('/iam/roles', b),
+    deleteRole: (n) => del(`/iam/roles/${n}`),
+  },
+  kms: {
+    keys: () => get('/kms/keys'),
+    create: (b) => post('/kms/keys', b),
+    delete: (id) => del(`/kms/keys/${id}`),
+  },
+  ssm: {
+    parameters: (path) => get('/ssm/parameters' + (path ? `?path=${encodeURIComponent(path)}` : '')),
+    create: (b) => post('/ssm/parameters', b),
+    delete: (n) => del(`/ssm/parameters/${encodeURIComponent(n)}`),
+  },
+  eventbridge: {
+    buses: () => get('/eventbridge/buses'),
+    rules: (bus) => get(`/eventbridge/buses/${bus}/rules`),
+    events: () => get('/eventbridge/events'),
+    deleteRule: (bus, n) => del(`/eventbridge/buses/${bus}/rules/${n}`),
+  },
+  cloudwatch: {
+    dashboard: () => get('/cloudwatch/dashboard'),
+    metrics: () => get('/cloudwatch/metrics'),
+    metric: (ns, n) => get(`/cloudwatch/metrics/${ns}/${n}`),
+    alarms: () => get('/cloudwatch/alarms'),
+  },
+  ses: {
+    emails: () => get('/ses/emails'),
+    clearEmails: () => del('/ses/emails'),
+    identities: () => get('/ses/identities'),
+    verifyIdentity: (e) => post('/ses/identities', { email: e }),
+    deleteIdentity: (e) => del(`/ses/identities/${encodeURIComponent(e)}`),
+  },
+  sfn: {
+    stateMachines: () => get('/sfn/statemachines'),
+    create: (b) => post('/sfn/statemachines', b),
+    delete: (n) => del(`/sfn/statemachines/${n}`),
+    executions: (n) => get(`/sfn/statemachines/${n}/executions`),
+    startExecution: (n, name, input) => post(`/sfn/statemachines/${n}/executions`, { name, input }),
+    describeExecution: (n, execName) => get(`/sfn/statemachines/${n}/executions/${encodeURIComponent(execName)}`),
+  },
+  cognito: {
+    userPools: () => get('/cognito/userpools'),
+    createPool: (n) => post('/cognito/userpools', { name: n }),
+    users: (id) => get(`/cognito/userpools/${id}/users`),
+    createUser: (id, username, email, attributes) => post(`/cognito/userpools/${id}/users`, { username, email, attributes }),
+    deleteUser: (id, username) => del(`/cognito/userpools/${id}/users/${encodeURIComponent(username)}`),
+    deletePool: (id) => del(`/cognito/userpools/${id}`),
+  },
+  terminal: {
+    create: (t, id) => post('/terminal/sessions', { type: t, instanceId: id }),
+    exec: (s, cmd) => post(`/terminal/sessions/${s}/exec`, { command: cmd }),
+    interrupt: (s) => post(`/terminal/sessions/${s}/interrupt`, {}),
+    close: (s) => del(`/terminal/sessions/${s}`),
+    streamUrl: (s) => `http://127.0.0.1:4566/mockcloud/terminal/sessions/${s}/stream`,
+  },
+};
