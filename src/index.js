@@ -147,5 +147,7 @@ awsServer.listen(PORT, HOST, async () => {
   }
 });
 
+uiServer.listen(UI_PORT, HOST);
+
 process.on('SIGTERM', () => { awsServer.close(); uiServer.close(); process.exit(0); });
 process.on('SIGINT', () => { awsServer.close(); uiServer.close(); process.exit(0); });

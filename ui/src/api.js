@@ -1,5 +1,5 @@
 // api.js — MockCloud internal REST API client
-const BASE = '/mockcloud';
+const BASE = `http://${window.location.hostname}:4566/mockcloud`;
 
 async function req(method, path, body) {
   const opts = { method, headers: {} };

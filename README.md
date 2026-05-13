@@ -60,12 +60,17 @@ Console  →  http://127.0.0.1:4567
 npm install -g mockcloud   # coming soon
 mockcloud
 ```
-
 ### Docker
 
 ```bash
+# Simulated mode (default, no Docker needed)
 docker pull ghcr.io/mockcloud/mockcloud:latest
 docker run -p 4566:4566 -p 4567:4567 ghcr.io/mockcloud/mockcloud
+
+# Docker VMM mode (real containers — mounts host Docker socket)
+docker run -p 4566:4566 -p 4567:4567 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  ghcr.io/mockcloud/mockcloud --ec2=docker
 ```
 
 ### From source
@@ -143,6 +148,9 @@ node src/index.js --ec2=docker      # EC2 backed by real Docker containers
 ```
 
 **EC2 auto-detect:** if no flag is passed and Docker is running, MockCloud uses Docker automatically. Otherwise falls back to simulated.
+
+When running in Docker, VMM mode requires mounting the host socket:
+-v /var/run/docker.sock:/var/run/docker.sock
 
 ---
 
