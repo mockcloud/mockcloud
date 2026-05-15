@@ -46,14 +46,15 @@ export async function handler(req, res) {
       const name = params.get('RoleName');
       if (store.iam.roles[name]) return errorXml(res, 409, 'EntityAlreadyExists', `Role ${name} already exists`);
       const a = arn('iam', `role/${name}`);
-      store.iam.roles[name] = { name, arn: a, created: Date.now(), policies:[], trustPolicy: params.get('AssumeRolePolicyDocument'), attached: 0 };
-      return xmlResponse(res, 200, wrap('CreateRoleResponse','CreateRoleResult', `<Role><RoleName>${escapeXml(name)}</RoleName><Arn>${escapeXml(a)}</Arn></Role>`));
+      const roleId = 'AROA' + randomId(16).toUpperCase();
+      store.iam.roles[name] = { name, arn: a, roleId, path: params.get('Path') || '/', created: Date.now(), policies:[], trustPolicy: params.get('AssumeRolePolicyDocument'), attached: 0 };
+      return xmlResponse(res, 200, wrap('CreateRoleResponse','CreateRoleResult', roleXml(store.iam.roles[name])));
     }
     case 'GetRole': {
       const name = params.get('RoleName');
       const r = store.iam.roles[name];
       if (!r) return errorXml(res, 404, 'NoSuchEntity', `Role ${name} not found`);
-      return xmlResponse(res, 200, wrap('GetRoleResponse','GetRoleResult', `<Role><RoleName>${escapeXml(r.name)}</RoleName><Arn>${escapeXml(r.arn)}</Arn></Role>`));
+      return xmlResponse(res, 200, wrap('GetRoleResponse','GetRoleResult', roleXml(r)));
     }
     case 'DeleteRole': {
       delete store.iam.roles[params.get('RoleName')];
@@ -62,6 +63,18 @@ export async function handler(req, res) {
     case 'ListRoles': {
       const roles = Object.values(store.iam.roles).map(r=>`<member><RoleName>${escapeXml(r.name)}</RoleName><Arn>${escapeXml(r.arn)}</Arn></member>`).join('');
       return xmlResponse(res, 200, wrap('ListRolesResponse','ListRolesResult', `<Roles>${roles}</Roles>`));
+    }
+    case 'ListRolePolicies': {
+      return xmlResponse(res, 200, wrap('ListRolePoliciesResponse','ListRolePoliciesResult', `<PolicyNames></PolicyNames><IsTruncated>false</IsTruncated>`));
+    }
+    case 'ListAttachedRolePolicies': {
+      return xmlResponse(res, 200, wrap('ListAttachedRolePoliciesResponse','ListAttachedRolePoliciesResult', `<AttachedPolicies></AttachedPolicies><IsTruncated>false</IsTruncated>`));
+    }
+    case 'ListRoleTags': {
+      return xmlResponse(res, 200, wrap('ListRoleTagsResponse','ListRoleTagsResult', `<Tags></Tags><IsTruncated>false</IsTruncated>`));
+    }
+    case 'ListInstanceProfilesForRole': {
+      return xmlResponse(res, 200, wrap('ListInstanceProfilesForRoleResponse','ListInstanceProfilesForRoleResult', `<InstanceProfiles></InstanceProfiles><IsTruncated>false</IsTruncated>`));
     }
     case 'AttachRolePolicy': {
       const name = params.get('RoleName');
@@ -86,6 +99,21 @@ export async function handler(req, res) {
     default:
       return xmlResponse(res, 200, wrap('UnknownResponse','Result','<ok/>'));
   }
+}
+
+function roleXml(r) {
+  const trust = r.trustPolicy ? escapeXml(r.trustPolicy) : '';
+  const created = new Date(r.created).toISOString();
+  return `<Role>` +
+    `<RoleName>${escapeXml(r.name)}</RoleName>` +
+    `<RoleId>${escapeXml(r.roleId || 'AROA0000000000000000')}</RoleId>` +
+    `<Arn>${escapeXml(r.arn)}</Arn>` +
+    `<Path>${escapeXml(r.path || '/')}</Path>` +
+    `<CreateDate>${created}</CreateDate>` +
+    `<AssumeRolePolicyDocument>${trust}</AssumeRolePolicyDocument>` +
+    `<MaxSessionDuration>3600</MaxSessionDuration>` +
+    `<RoleLastUsed></RoleLastUsed>` +
+    `</Role>`;
 }
 
 function wrap(respTag, resultTag, inner) {

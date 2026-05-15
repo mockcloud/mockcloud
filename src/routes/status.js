@@ -1,7 +1,12 @@
 // routes/status.js — health, status, trail, reset, export
 import { store } from '../store.js';
 import { jsonResponse } from '../middleware/response.js';
-import { VERSION } from '../index.js';
+import { VERSION } from '../version.js';
+import { rmSync, existsSync } from 'fs';
+import path from 'path';
+import os from 'os';
+
+const S3_ROOT = process.env.MOCKCLOUD_S3_ROOT || path.join(os.homedir(), '.mockcloud', 's3');
 
 const SERVICES = [
   's3', 'dynamodb', 'dynamodbstreams', 'lambda', 'iam', 'sts',
@@ -26,7 +31,9 @@ export function registerStatusRoutes(app) {
     const instances = Object.values(store.ec2.instances);
     const fns = Object.values(store.lambda.functions);
     const buckets = Object.values(store.s3.buckets);
-    const objects = buckets.flatMap(b => Object.values(b.objects));
+    // Snapshot imports may produce buckets without `objects` — be defensive
+    // so /mockcloud/status doesn't 500 the whole UI on a single bad entry.
+    const objects = buckets.flatMap(b => b?.objects ? Object.values(b.objects) : []);
 
     // Probe Docker availability for the EC2 toggle. The helper caches
     // for 3s, so a 10s status poll triggers a real ping at most every
@@ -51,10 +58,10 @@ export function registerStatusRoutes(app) {
         ec2Running: instances.filter(i => i.state === 'running').length,
         ec2Total: instances.length,
         lambdaFunctions: fns.length,
-        lambdaInvocations: fns.reduce((s, f) => s + f.invocations, 0),
+        lambdaInvocations: fns.reduce((s, f) => s + (Number.isFinite(f.invocations) ? f.invocations : 0), 0),
         s3Buckets: buckets.length,
         s3Objects: objects.length,
-        s3Bytes: objects.reduce((s, o) => s + o.size, 0),
+        s3Bytes: objects.reduce((s, o) => s + (Number.isFinite(o?.size) ? o.size : 0), 0),
         dynamoTables: Object.keys(store.dynamodb.tables).length,
         snsTopics: Object.keys(store.sns.topics).length,
         sqsQueues: Object.keys(store.sqs.queues).length,
@@ -76,7 +83,46 @@ export function registerStatusRoutes(app) {
     jsonResponse(res, 200, { events: store.trail.slice(0, limit) });
   });
   app.delete('/mockcloud/trail', (req, res) => { store.trail = []; jsonResponse(res, 200, { cleared: true }); });
-  app.delete('/mockcloud/reset', (req, res) => { store.reset(req.query?.service); jsonResponse(res, 200, { reset: req.query?.service || 'all' }); });
+  app.delete('/mockcloud/reset', async (req, res) => {
+    const service = req.query?.service;
+    const stats = { resetService: service || 'all', dockerTerminated: 0, dockerErrors: 0 };
+
+    // Before flushing the store, terminate any Docker containers MockCloud spawned
+    // for EC2 instances — otherwise they'd be orphaned with no record in the store.
+    // Skip if a non-EC2 service-specific reset was requested.
+    if (!service || service === 'ec2') {
+      try {
+        const { dockerAction, listDockerEC2Containers } = await import('../services/docker.js');
+        // First terminate anything we have a containerId for in the store
+        const tracked = Object.values(store.ec2.instances).filter(i => i.containerId);
+        for (const inst of tracked) {
+          try { await dockerAction(inst.containerId, 'terminate'); stats.dockerTerminated++; }
+          catch { stats.dockerErrors++; }
+        }
+        // Then sweep any leftover mockcloud-labeled containers (orphans from prior runs)
+        try {
+          const live = await listDockerEC2Containers();
+          for (const c of live) {
+            try { await dockerAction(c.id || c.Id, 'terminate'); stats.dockerTerminated++; }
+            catch { stats.dockerErrors++; }
+          }
+        } catch { /* Docker not available — fine */ }
+      } catch { /* docker.js not available — fine */ }
+    }
+
+    store.reset(service);
+
+    // Wipe S3 disk so buckets don't resurrect on next restart
+    if (!service || service === 's3') {
+      try {
+        if (existsSync(S3_ROOT)) rmSync(S3_ROOT, { recursive: true, force: true });
+      } catch (e) {
+        stats.s3DiskError = e.message;
+      }
+    }
+
+    jsonResponse(res, 200, { reset: service || 'all', ...stats });
+  });
 
   app.get('/mockcloud/export', (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename="mockcloud-snapshot.json"' });

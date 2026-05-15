@@ -118,9 +118,14 @@ function decrypt(req, res) {
   const b = parseBody(req);
   try {
     const raw = Buffer.from(b.CiphertextBlob, 'base64').toString();
-    const parts = raw.split(':');
-    const keyId = parts[1] || 'unknown';
-    const plaintext = parts[2] ? Buffer.from(parts[2]).toString('base64') : Buffer.from(randomId(16)).toString('base64');
+    // Format produced by encrypt(): "mockcloud-enc:<keyId>:<plaintext-base64>"
+    // The plaintext segment is *already* base64 (AWS KMS API contract), so
+    // return it as-is; re-encoding it here breaks Encrypt→Decrypt round-trip.
+    const sep = raw.indexOf(':');
+    const sep2 = raw.indexOf(':', sep + 1);
+    if (sep < 0 || sep2 < 0) throw new Error('malformed');
+    const keyId = raw.slice(sep + 1, sep2) || 'unknown';
+    const plaintext = raw.slice(sep2 + 1);
     store.addTrail({ method: 'POST', path: '/kms/Decrypt', status: 200, latency: 2 });
     jsonResponse(res, 200, {
       KeyId:     arn('kms', `key/${keyId}`),

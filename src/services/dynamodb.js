@@ -94,7 +94,7 @@ function getItem(res, payload) {
   if (!table) return errorJson(res, 400, 'ResourceNotFoundException', `Table ${name} not found`);
   const key = unmarshal(payload.Key || {});
   const item = table.items.find(i => i[table.pk] === key[table.pk] && (!table.sk || i[table.sk] === key[table.sk]));
-  return jsonResponse(res, 200, item ? { Item: marshal(item) } : {});
+  return jsonResponse(res, 200, item ? { Item: marshalItem(item) } : {});
 }
 
 function deleteItem(res, payload) {
@@ -143,7 +143,7 @@ function scan(res, payload) {
   if (!table) return errorJson(res, 400, 'ResourceNotFoundException', `Table ${name} not found`);
   const limit = payload.Limit || table.items.length;
   const items = table.items.slice(0, limit);
-  return jsonResponse(res, 200, { Items: items.map(marshal), Count: items.length, ScannedCount: items.length });
+  return jsonResponse(res, 200, { Items: items.map(marshalItem), Count: items.length, ScannedCount: items.length });
 }
 
 function query(res, payload) {
@@ -161,7 +161,7 @@ function query(res, payload) {
       return false;
     });
   }
-  return jsonResponse(res, 200, { Items: items.map(marshal), Count: items.length, ScannedCount: table.items.length });
+  return jsonResponse(res, 200, { Items: items.map(marshalItem), Count: items.length, ScannedCount: table.items.length });
 }
 
 function batchWrite(res, payload) {
@@ -196,8 +196,10 @@ function batchGet(res, payload) {
     if (!table) continue;
     responses[tableName] = (spec.Keys || []).map(k => {
       const key = unmarshal(k);
-      return table.items.find(i => i[table.pk] === key[table.pk]);
-    }).filter(Boolean).map(marshal);
+      return table.items.find(i =>
+        i[table.pk] === key[table.pk] && (!table.sk || i[table.sk] === key[table.sk])
+      );
+    }).filter(Boolean).map(marshalItem);
   }
   return jsonResponse(res, 200, { Responses: responses, UnprocessedKeys: {} });
 }
@@ -230,6 +232,13 @@ function transactWrite(res, payload) {
 }
 
 // ── Marshaling helpers ────────────────────────────────────────────────────
+
+// An "item" is a flat map of attribute names → marshaled values. The
+// generic marshal() below would wrap the whole thing in `{ M: ... }`, which
+// is correct for *nested* maps but wrong for the top-level Item AWS returns.
+function marshalItem(item) {
+  return Object.fromEntries(Object.entries(item).map(([k, v]) => [k, marshal(v)]));
+}
 
 function marshal(obj) {
   if (obj === null || obj === undefined) return { NULL: true };

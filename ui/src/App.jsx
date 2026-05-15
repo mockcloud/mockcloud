@@ -108,7 +108,7 @@ export default function App() {
 
   return (
     <div className="app">
-      <Topbar theme={theme} setTheme={setTheme} openCmd={() => setCmdOpen(true)} version={status?.version} />
+      <Topbar theme={theme} setTheme={setTheme} openCmd={() => setCmdOpen(true)} version={status?.version} pushToast={pushToast} />
       <Sidebar current={page} setCurrent={id => {
         if (id === 'terminal' && (!terminalTarget || terminalTarget.type === 'ec2')) setTerminalTarget({ type: 'cli' });
         setPage(id);

@@ -2,11 +2,11 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 :root {
-  --accent-h: 146;
-  --accent: oklch(54% 0.18 var(--accent-h));
-  --accent-hover: oklch(59% 0.18 var(--accent-h));
-  --accent-soft: oklch(54% 0.18 var(--accent-h) / 0.14);
-  --accent-border: oklch(54% 0.18 var(--accent-h) / 0.38);
+  --accent-h: 265.47;
+  --accent: oklch(58% 0.21 var(--accent-h));
+  --accent-hover: oklch(64% 0.24 var(--accent-h));
+  --accent-soft: oklch(59% 0.24 var(--accent-h) / 0.14);
+  --accent-border: oklch(59% 0.24 var(--accent-h) / 0.38);
   --accent-fg: #ffffff;
 
   --ok: oklch(68% 0.14 165);
@@ -205,7 +205,7 @@ pre {
   border-radius: 6px;
   background: var(--accent);
   color: var(--accent-fg);
-  box-shadow: 0 0 0 1px var(--border) inset, 0 1px 2px rgb(0 0 0 / 0.15);
+  /* box-shadow: 0 0 0 1px var(--border) inset, 0 1px 2px rgb(0 0 0 / 0.15); */
 }
 
 .brand-sub {
@@ -311,7 +311,7 @@ pre {
   width: 26px;
   height: 26px;
   border-radius: 999px;
-  background: linear-gradient(135deg, var(--accent), oklch(58% 0.14 195));
+  background: linear-gradient(135deg, var(--accent), oklch(58% 0.2 290));
   color: white;
   font-size: 11px;
   font-weight: 600;
@@ -529,7 +529,7 @@ pre {
   background: var(--accent);
   color: var(--accent-fg);
   border-color: var(--accent);
-  box-shadow: 0 1px 0 oklch(25% 0.1 var(--accent-h) / 0.2) inset, var(--shadow-sm);
+  box-shadow: 0 1px 0 oklch(25% 0.15 var(--accent-h) / 0.2) inset, var(--shadow-sm);
 }
 
 .btn-primary:hover:not(:disabled) {

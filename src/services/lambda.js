@@ -58,6 +58,7 @@ export async function handler(req, res) {
       name,
       runtime:     payload.Runtime || 'nodejs20.x',
       handler:     payload.Handler || 'index.handler',
+      role:        payload.Role || '',
       memory:      payload.MemorySize || 128,
       timeout:     payload.Timeout || 3,
       env:         payload.Environment?.Variables || {},
@@ -75,7 +76,12 @@ export async function handler(req, res) {
   if (method === 'GET' && fnName && !action) {
     const fn = store.lambda.functions[fnName];
     if (!fn) return errorJson(res, 404, 'ResourceNotFoundException', `Function not found: ${fnName}`);
-    return jsonResponse(res, 200, fnConfig(fn));
+    // GetFunction wraps config in Configuration; CreateFunction returns it flat
+    return jsonResponse(res, 200, {
+      Configuration: fnConfig(fn),
+      Code: { Location: `http://localhost:4566/lambda-code/${fn.name}.zip` },
+      Tags: {},
+    });
   }
 
   // ── Delete function ────────────────────────────────────────────────────
@@ -130,6 +136,32 @@ export async function handler(req, res) {
     if (!fn) return errorJson(res, 404, 'ResourceNotFoundException', `Function not found: ${fnName}`);
     fn.code = decodeUploadedCode(payload) || body.slice(0, 10240);
     return jsonResponse(res, 200, fnConfig(fn));
+  }
+
+  // ── List versions ──────────────────────────────────────────────────────
+  if (method === 'GET' && fnName && action === 'versions') {
+    const fn = store.lambda.functions[fnName];
+    if (!fn) return errorJson(res, 404, 'ResourceNotFoundException', `Function not found: ${fnName}`);
+    return jsonResponse(res, 200, { Versions: [{ ...fnConfig(fn), Version: '$LATEST' }], NextMarker: null });
+  }
+
+  // ── Code signing config — return 200 with empty ARN (provider crashes on 404) ──
+  if (fnName && action === 'code-signing-config') {
+    return jsonResponse(res, 200, { CodeSigningConfigArn: '', FunctionName: fnName });
+  }
+
+  // ── Concurrency / other sub-resources ─────────────────────────────────
+  // These specific handlers must come BEFORE the broad GET catch-all below.
+  if (method === 'GET' && fnName && action === 'concurrency') {
+    return jsonResponse(res, 200, { ReservedConcurrentExecutions: -1 });
+  }
+  if (method === 'GET' && fnName && action === 'policy') {
+    return errorJson(res, 404, 'ResourceNotFoundException', `No policy for function: ${fnName}`);
+  }
+
+  // Broad catch: any unknown GET sub-resource under a function → JSON 404
+  if (method === 'GET' && fnName && action) {
+    return errorJson(res, 404, 'ResourceNotFoundException', `Unsupported sub-resource: ${action}`);
   }
 
   errorJson(res, 400, 'UnknownOperation', `Unknown Lambda operation: ${method} ${url.pathname}`);
@@ -366,12 +398,20 @@ function fnConfig(fn) {
     FunctionArn:  arn('lambda', `function:${fn.name}`),
     Runtime:      fn.runtime,
     Handler:      fn.handler,
+    Role:         fn.role || arn('iam', `role/${fn.name}-role`),
     MemorySize:   fn.memory,
     Timeout:      fn.timeout,
+    PackageType:  'Zip',
+    Architectures: ['x86_64'],
     Environment:  { Variables: fn.env },
-    State:        'Active',
-    LastModified: new Date(fn.created).toISOString(),
+    TracingConfig: { Mode: 'PassThrough' },
+    EphemeralStorage: { Size: 512 },
+    LoggingConfig: { LogFormat: 'Text', LogGroup: `/aws/lambda/${fn.name}` },
+    State:           'Active',
+    StateReasonCode: 'Idle',
+    LastModified:    new Date(fn.created).toISOString(),
     CodeSize:     fn.code?.length || 0,
+    Version:      '$LATEST',
     // mockcloud extras
     _invocations: fn.invocations,
     _errors:      fn.errors,

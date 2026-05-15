@@ -108,13 +108,15 @@ async function startExecution(req, res) {
   store.stepfunctions.executions[execArn] = execution;
   store.addTrail({ method: 'POST', path: `/states/${name}/start`, status: 200, latency: 10 });
 
-  // Simulate execution completing after 500ms
-  setTimeout(() => {
+  // Simulate execution completing after 500ms. unref so this doesn't keep
+  // the Node event loop alive in tests / short-lived embedders.
+  const t = setTimeout(() => {
     execution.status   = 'SUCCEEDED';
     execution.stopDate = Date.now() / 1000;
     execution.output   = b.input || '{}';
     execution.history.push({ timestamp: Date.now() / 1000, type: 'ExecutionSucceeded', executionSucceededEventDetails: { output: execution.output } });
   }, 500 + Math.random() * 1000);
+  t.unref?.();
 
   jsonResponse(res, 200, { executionArn: execArn, startDate: execution.startDate });
 }

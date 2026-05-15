@@ -1,12 +1,22 @@
 // services/sqs.js
 import { store, randomId, arn } from '../store.js';
-import { xmlResponse, errorXml, escapeXml, getRawBody } from '../middleware/response.js';
+import { xmlResponse, jsonResponse, errorXml, escapeXml, getRawBody } from '../middleware/response.js';
 import crypto from 'crypto';
 
 const ACCOUNT = '000000000000';
 
 export async function handler(req, res) {
   const body = getRawBody(req);
+  const target = req.headers['x-amz-target'] || '';
+
+  // AWS SDK v2 uses JSON protocol with x-amz-target: AmazonSQS.ActionName
+  if (target.startsWith('AmazonSQS.')) {
+    const action = target.split('.')[1];
+    let payload = {};
+    try { payload = JSON.parse(body); } catch {}
+    return handleJsonProtocol(req, res, action, payload);
+  }
+
   const params = new URLSearchParams(body);
   const action = new URL(req.url, 'http://x').searchParams.get('Action') || params.get('Action');
 
@@ -43,6 +53,7 @@ export async function handler(req, res) {
       const url = params.get('QueueUrl');
       const q = store.sqs.queues[url];
       if (!q) return errorXml(res, 400, 'AWS.SimpleQueueService.NonExistentQueue', 'Queue not found');
+      for (const m of q.messages) cancelVisibilityTimer(m);
       q.messages = [];
       return xmlResponse(res, 200, sqsWrap('PurgeQueueResponse','PurgeQueueResult',''));
     }
@@ -73,11 +84,9 @@ export async function handler(req, res) {
       const q = store.sqs.queues[url];
       if (!q) return errorXml(res, 400, 'AWS.SimpleQueueService.NonExistentQueue', 'Queue not found');
       const maxMsgs = parseInt(params.get('MaxNumberOfMessages') || '1');
+      const visMs = (parseInt(params.get('VisibilityTimeout') || '30')) * 1000;
       const msgs = q.messages.filter(m => m.visible).slice(0, maxMsgs);
-      msgs.forEach(m => {
-        m.visible = false;
-        setTimeout(() => { m.visible = true; }, 30000);
-      });
+      msgs.forEach(m => hideMessage(m, visMs));
       const xml = msgs.map(m =>
         `<Message><MessageId>${m.id}</MessageId><ReceiptHandle>${m.receiptHandle}</ReceiptHandle><Body>${escapeXml(m.body)}</Body><MD5OfBody>${md5(m.body)}</MD5OfBody></Message>`
       ).join('');
@@ -87,7 +96,7 @@ export async function handler(req, res) {
       const url = params.get('QueueUrl');
       const q = store.sqs.queues[url];
       const handle = params.get('ReceiptHandle');
-      if (q) q.messages = q.messages.filter(m => m.receiptHandle !== handle);
+      if (q) q.messages = removeAndCancel(q.messages, m => m.receiptHandle === handle);
       return xmlResponse(res, 200, sqsWrap('DeleteMessageResponse','DeleteMessageResult',''));
     }
     case 'GetQueueAttributes': {
@@ -110,6 +119,99 @@ export async function handler(req, res) {
     }
     default:
       return errorXml(res, 400, 'InvalidAction', `Unknown SQS action: ${action}`);
+  }
+}
+
+// ── JSON protocol handler (AWS SDK v2 / Terraform provider v5) ──────────────
+function handleJsonProtocol(req, res, action, payload) {
+  switch (action) {
+    case 'CreateQueue': {
+      const name = payload.QueueName;
+      const url = queueUrlFor(name);
+      const a = arn('sqs', name);
+      if (!store.sqs.queues[url]) {
+        store.sqs.queues[url] = {
+          name, url, arn: a,
+          type: name.endsWith('.fifo') ? 'fifo' : 'standard',
+          attributes: payload.Attributes || {}, messages: [], created: Date.now(),
+        };
+      }
+      return jsonResponse(res, 200, { QueueUrl: url });
+    }
+    case 'GetQueueUrl': {
+      const url = queueUrlFor(payload.QueueName);
+      if (!store.sqs.queues[url]) return jsonResponse(res, 400, { __type: 'QueueDoesNotExist', message: 'Queue not found' });
+      return jsonResponse(res, 200, { QueueUrl: url });
+    }
+    case 'GetQueueAttributes': {
+      const url = payload.QueueUrl;
+      const q = store.sqs.queues[url];
+      if (!q) return jsonResponse(res, 400, { __type: 'QueueDoesNotExist', message: 'Queue not found' });
+      const visible    = q.messages.filter(m => m.visible).length;
+      const notVisible = q.messages.filter(m => !m.visible).length;
+      const attrs = {
+        QueueArn: q.arn,
+        ApproximateNumberOfMessages: String(visible),
+        ApproximateNumberOfMessagesNotVisible: String(notVisible),
+        ApproximateNumberOfMessagesDelayed: '0',
+        VisibilityTimeout: '30',
+        MaximumMessageSize: '262144',
+        MessageRetentionPeriod: '86400',
+        ReceiveMessageWaitTimeSeconds: '0',
+        SqsManagedSseEnabled: 'true',
+        ...q.attributes,
+      };
+      return jsonResponse(res, 200, { Attributes: attrs });
+    }
+    case 'SetQueueAttributes': {
+      const url = payload.QueueUrl;
+      const q = store.sqs.queues[url];
+      if (!q) return jsonResponse(res, 400, { __type: 'QueueDoesNotExist', message: 'Queue not found' });
+      Object.assign(q.attributes, payload.Attributes || {});
+      return jsonResponse(res, 200, {});
+    }
+    case 'ListQueues': {
+      return jsonResponse(res, 200, { QueueUrls: Object.keys(store.sqs.queues) });
+    }
+    case 'DeleteQueue': {
+      delete store.sqs.queues[payload.QueueUrl];
+      return jsonResponse(res, 200, {});
+    }
+    case 'PurgeQueue': {
+      const q = store.sqs.queues[payload.QueueUrl];
+      if (q) {
+        for (const m of q.messages) cancelVisibilityTimer(m);
+        q.messages = [];
+      }
+      return jsonResponse(res, 200, {});
+    }
+    case 'SendMessage': {
+      const url = payload.QueueUrl;
+      const q = store.sqs.queues[url];
+      if (!q) return jsonResponse(res, 400, { __type: 'QueueDoesNotExist', message: 'Queue not found' });
+      const msgBody = payload.MessageBody || '';
+      const msg = enqueueMessage(url, msgBody, { dedupeId: payload.MessageDeduplicationId });
+      return jsonResponse(res, 200, { MessageId: msg.id, MD5OfMessageBody: md5(msgBody) });
+    }
+    case 'ReceiveMessage': {
+      const url = payload.QueueUrl;
+      const q = store.sqs.queues[url];
+      if (!q) return jsonResponse(res, 400, { __type: 'QueueDoesNotExist', message: 'Queue not found' });
+      const maxMsgs = payload.MaxNumberOfMessages || 1;
+      const visMs = (payload.VisibilityTimeout ?? 30) * 1000;
+      const msgs = q.messages.filter(m => m.visible).slice(0, maxMsgs);
+      msgs.forEach(m => hideMessage(m, visMs));
+      return jsonResponse(res, 200, {
+        Messages: msgs.map(m => ({ MessageId: m.id, ReceiptHandle: m.receiptHandle, Body: m.body, MD5OfBody: md5(m.body) }))
+      });
+    }
+    case 'DeleteMessage': {
+      const q = store.sqs.queues[payload.QueueUrl];
+      if (q) q.messages = removeAndCancel(q.messages, m => m.receiptHandle === payload.ReceiptHandle);
+      return jsonResponse(res, 200, {});
+    }
+    default:
+      return jsonResponse(res, 400, { __type: 'InvalidAction', message: `Unknown SQS action: ${action}` });
   }
 }
 
@@ -140,6 +242,37 @@ export function queueUrlForArn(sqsArn) {
 
 function queueUrlFor(name) {
   return `http://localhost:4566/${ACCOUNT}/${name}`;
+}
+
+// Hide a message and schedule its visibility to be restored after `ms`. We
+// store the timer on the message so DeleteMessage / PurgeQueue can cancel it.
+// Without cancellation the closure used to silently re-mark a deleted message
+// as visible (harmless if the queue was deleted, but it kept node alive in
+// tests and made invariants fuzzy).
+function hideMessage(m, ms) {
+  m.visible = false;
+  cancelVisibilityTimer(m);
+  m._visTimer = setTimeout(() => {
+    m.visible = true;
+    m._visTimer = null;
+  }, ms);
+  m._visTimer.unref?.();
+}
+
+function cancelVisibilityTimer(m) {
+  if (m && m._visTimer) {
+    clearTimeout(m._visTimer);
+    m._visTimer = null;
+  }
+}
+
+function removeAndCancel(messages, predicate) {
+  const kept = [];
+  for (const m of messages) {
+    if (predicate(m)) cancelVisibilityTimer(m);
+    else kept.push(m);
+  }
+  return kept;
 }
 
 function md5(str) {

@@ -8,12 +8,15 @@ import { store } from './store.js';
 import { Router } from './router.js';
 import { dispatchAWS } from './dispatcher.js';
 import { registerAllRoutes } from './routes/index.js';
+import { VERSION } from './version.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Read version from package.json so banner / /health / Topbar stay in sync
-const PKG = JSON.parse(readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-export const VERSION = PKG.version;
+// Re-exported for callers that historically imported VERSION from this module.
+// New code should `import { VERSION } from './version.js'` to avoid pulling
+// the entire HTTP daemon into the import graph (this module starts servers
+// at module-load time, which is fatal for tests).
+export { VERSION };
 
 const PORT = parseInt(process.env.PORT || '4566');
 const UI_PORT = parseInt(process.env.UI_PORT || '4567');

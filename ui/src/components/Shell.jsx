@@ -1,8 +1,11 @@
 // components/Shell.jsx — Topbar and Sidebar
-import React from 'react';
+import React, { useState } from 'react';
 import * as Icons from './Icons.jsx';
+import { Modal } from './UI.jsx';
+import { api } from '../api.js';
 
-export function Topbar({ theme, setTheme, openCmd, version }) {
+export function Topbar({ theme, setTheme, openCmd, version, pushToast }) {
+  const [settingsOpen, setSettingsOpen] = useState(false);
   return (
     <div className="topbar">
       <div className="hstack" style={{ gap: 24 }}>
@@ -37,12 +40,78 @@ export function Topbar({ theme, setTheme, openCmd, version }) {
         <button className="icon-btn" title={theme === 'dark' ? 'Switch to light' : 'Switch to dark'} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
           {theme === 'dark' ? <Icons.IconSun size={15} /> : <Icons.IconMoon size={15} />}
         </button>
-        <button className="icon-btn" title="Settings">
+        <button className="icon-btn" title="Settings" onClick={() => setSettingsOpen(true)}>
           <Icons.IconSettings size={15} />
         </button>
         <div className="avatar" title="mockcloud">MC</div>
       </div>
+      {settingsOpen && (
+        <SettingsModal onClose={() => setSettingsOpen(false)} pushToast={pushToast} />
+      )}
     </div>
+  );
+}
+
+function SettingsModal({ onClose, pushToast }) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function doReset() {
+    setBusy(true);
+    try {
+      const r = await api.reset();
+      pushToast?.({
+        kind: 'success',
+        title: 'All resources reset',
+        body: r?.dockerTerminated
+          ? `Cleared store · ${r.dockerTerminated} Docker container(s) terminated`
+          : 'Cleared store',
+      });
+      onClose();
+    } catch (e) {
+      pushToast?.({ kind: 'error', title: 'Reset failed', body: e?.message || 'Unknown error' });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title="Settings" onClose={onClose}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Reset all resources</div>
+          <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 12, lineHeight: 1.5 }}>
+            Permanently delete every resource across all services (EC2, S3, Lambda, DynamoDB, IAM, etc.),
+            clear the activity trail, and terminate any Docker containers spawned by MockCloud.
+            This cannot be undone.
+          </div>
+          {!confirming ? (
+            <button
+              className="btn"
+              style={{ background: 'var(--danger, #dc2626)', color: '#fff', borderColor: 'transparent' }}
+              onClick={() => setConfirming(true)}
+            >
+              Reset all resources…
+            </button>
+          ) : (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <span style={{ fontSize: 12, fontWeight: 600 }}>Are you sure?</span>
+              <button
+                className="btn"
+                style={{ background: 'var(--danger, #dc2626)', color: '#fff', borderColor: 'transparent' }}
+                onClick={doReset}
+                disabled={busy}
+              >
+                {busy ? 'Resetting…' : 'Yes, wipe everything'}
+              </button>
+              <button className="btn" onClick={() => setConfirming(false)} disabled={busy}>
+                Cancel
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </Modal>
   );
 }
 

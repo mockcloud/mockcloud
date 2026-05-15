@@ -18,7 +18,7 @@ const INITIAL_STATE = {
   sqs:             () => ({ queues: {} }),
   secretsmanager:  () => ({ secrets: {} }),
   ec2:             () => ({ instances: {}, keyPairs: {}, securityGroups: {}, mode: 'vmm' }),
-  apigateway:      () => ({ restApis: {} }),
+  apigateway:      () => ({ restApis: {}, v2: { apis: {} } }),
   kms:             () => ({ keys: {} }),
   ssm:             () => ({ parameters: {} }),
   eventbridge:     () => ({ buses: { default: { name: 'default', rules: {} } }, events: [] }),
@@ -86,10 +86,17 @@ export const store = {
 
   // Restore from a snapshot. Unknown keys are ignored. Missing services
   // keep their current state, so older snapshots still load cleanly.
+  // For services present in the snapshot, the namespace is reset to its
+  // factory defaults first so leftover state from the previous session
+  // (instances, queues, etc.) doesn't bleed into the imported state — the
+  // shallow Object.assign in v1.2.1 left these in place.
   import(data) {
     const p = typeof data === 'string' ? JSON.parse(data) : data;
     for (const k of SERVICE_KEYS) {
-      if (p[k]) Object.assign(this[k], p[k]);
+      if (p[k]) {
+        this[k] = INITIAL_STATE[k]();
+        Object.assign(this[k], p[k]);
+      }
     }
     if (Array.isArray(p.trail)) this.trail = p.trail.slice(0, this.trailMax);
   },
@@ -103,14 +110,28 @@ export function arn(service, resource) {
   return `arn:aws:${service}:us-east-1:000000000000:${resource}`;
 }
 
-// Background CloudWatch collector — every 60s
-setInterval(() => {
-  store.putMetric('MockCloud/Lambda', 'Invocations', Object.values(store.lambda.functions).reduce((s,f)=>s+f.invocations,0));
-  store.putMetric('MockCloud/Lambda', 'Errors', Object.values(store.lambda.functions).reduce((s,f)=>s+(f.errors||0),0));
-  store.putMetric('MockCloud/S3', 'NumberOfObjects', Object.values(store.s3.buckets).reduce((s,b)=>s+Object.keys(b.objects).length,0));
-  store.putMetric('MockCloud/S3', 'BucketSizeBytes', Object.values(store.s3.buckets).flatMap(b=>Object.values(b.objects)).reduce((s,o)=>s+o.size,0));
-  store.putMetric('MockCloud/SQS', 'NumberOfMessagesSent', Object.values(store.sqs.queues).reduce((s,q)=>s+q.messages.length,0));
-  store.putMetric('MockCloud/DynamoDB', 'SuccessfulRequestLatency', Math.random()*5+1);
-  store.putMetric('MockCloud/EC2', 'RunningInstances', Object.values(store.ec2.instances).filter(i=>i.state==='running').length);
-  store.putMetric('MockCloud/SES', 'EmailsSent', store.ses.sent);
+// Background CloudWatch collector — every 60s.
+// Defensive accessors guard against snapshot imports that omit fields
+// (e.g. a Lambda function without `invocations`, a bucket without `objects`).
+// Without these guards a single malformed entry can crash the interval and
+// silently break metrics for the rest of the session.
+const num = v => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+const objCount = b => (b && b.objects ? Object.keys(b.objects).length : 0);
+const objSizes = b => (b && b.objects ? Object.values(b.objects) : []);
+const metricsTimer = setInterval(() => {
+  try {
+    store.putMetric('MockCloud/Lambda', 'Invocations', Object.values(store.lambda.functions).reduce((s,f)=>s+num(f.invocations),0));
+    store.putMetric('MockCloud/Lambda', 'Errors', Object.values(store.lambda.functions).reduce((s,f)=>s+num(f.errors),0));
+    store.putMetric('MockCloud/S3', 'NumberOfObjects', Object.values(store.s3.buckets).reduce((s,b)=>s+objCount(b),0));
+    store.putMetric('MockCloud/S3', 'BucketSizeBytes', Object.values(store.s3.buckets).flatMap(objSizes).reduce((s,o)=>s+num(o?.size),0));
+    store.putMetric('MockCloud/SQS', 'NumberOfMessagesSent', Object.values(store.sqs.queues).reduce((s,q)=>s+(q.messages?.length||0),0));
+    store.putMetric('MockCloud/DynamoDB', 'SuccessfulRequestLatency', Math.random()*5+1);
+    store.putMetric('MockCloud/EC2', 'RunningInstances', Object.values(store.ec2.instances).filter(i=>i.state==='running').length);
+    store.putMetric('MockCloud/SES', 'EmailsSent', num(store.ses.sent));
+  } catch (e) {
+    console.warn('[CloudWatch collector] tick failed:', e.message);
+  }
 }, 60_000);
+// Don't keep the Node event loop alive solely for this interval — otherwise
+// `node --test` (and any embedder) hangs after the work is done.
+metricsTimer.unref?.();
