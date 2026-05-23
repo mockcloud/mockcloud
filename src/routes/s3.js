@@ -5,13 +5,16 @@
 // router's :param syntax can't capture across `/`.
 import { store } from '../store.js';
 import { jsonResponse, errorJson, getRawBuffer } from '../middleware/response.js';
-import { putObjectToBucket } from '../services/s3.js';
+import { putObjectToBucket, isValidBucketName } from '../services/s3.js';
+import { safeJoin } from '../middleware/http.js';
 import path from 'path';
 import os from 'os';
 import { readFileSync, rmSync } from 'fs';
 
 const body = req => req.parsedBody || {};
-const S3_ROOT = path.join(os.homedir(), '.mockcloud', 's3');
+// Honour the test override (tests set MOCKCLOUD_S3_ROOT to a per-pid tmpdir
+// so disk hydration in services/s3.js targets the same location).
+const S3_ROOT = process.env.MOCKCLOUD_S3_ROOT || path.join(os.homedir(), '.mockcloud', 's3');
 
 export function registerS3Routes(app) {
 
@@ -29,6 +32,9 @@ export function registerS3Routes(app) {
   app.post('/mockcloud/s3/buckets', (req, res) => {
     const { name, region } = body(req);
     if (!name) return errorJson(res, 400, 'ValidationError', 'name required');
+    if (!isValidBucketName(name)) {
+      return errorJson(res, 400, 'ValidationError', 'bucket name must match AWS naming rules (3-63 chars, lowercase alphanumeric, dots, hyphens)');
+    }
     if (store.s3.buckets[name]) return errorJson(res, 409, 'Conflict', 'Bucket already exists');
     store.s3.buckets[name] = { name, region: region || 'us-east-1', created: Date.now(), objects: {} };
     store.addTrail({ method: 'POST', path: `/s3/${name}`, status: 200, latency: 2 });
@@ -106,6 +112,13 @@ export function registerS3Routes(app) {
     if (!key) return errorJson(res, 400, 'ValidationError', 'key query param required');
     const b = store.s3.buckets[name];
     if (!b) return errorJson(res, 404, 'NotFound', 'Bucket not found');
+    // Object must be registered via the API before we delete its on-disk
+    // file. Without this check, attackers could probe for arbitrary file
+    // paths under a bad-named bucket — rmSync({ force: true }) silences
+    // ENOENT and they'd still get a 200 either way.
+    if (!Object.prototype.hasOwnProperty.call(b.objects, key)) {
+      return errorJson(res, 404, 'NotFound', 'Object not found');
+    }
     delete b.objects[key];
     try { rmSync(diskPath(name, key), { force: true }); } catch {}
     store.addTrail({ method: 'DELETE', path: `/s3/${name}/${key}`, status: 200, latency: 1 });
@@ -115,5 +128,8 @@ export function registerS3Routes(app) {
 
 function diskPath(bucket, key) {
   const safeKey = key.split('/').map(p => p === '..' ? '__' : p).join('/');
-  return path.join(S3_ROOT, bucket, safeKey);
+  // safeJoin throws 'path escape' if bucket/key would resolve outside
+  // S3_ROOT — defense in depth on top of bucket-name validation at the
+  // create handler.
+  return safeJoin(S3_ROOT, bucket, safeKey);
 }

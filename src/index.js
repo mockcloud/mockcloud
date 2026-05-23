@@ -9,6 +9,7 @@ import { Router } from './router.js';
 import { dispatchAWS } from './dispatcher.js';
 import { registerAllRoutes } from './routes/index.js';
 import { VERSION } from './version.js';
+import { applyCors, attachBody, safeJoin } from './middleware/http.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -39,34 +40,17 @@ if (ec2Flag && !ec2Requested) {
   process.exit(1);
 }
 
-// ── Body reader ────────────────────────────────────────────────────────────
-function readBody(req) {
-  return new Promise(resolve => {
-    const chunks = [];
-    req.on('data', d => chunks.push(d));
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-  });
-}
-
 // ── Internal UI router ─────────────────────────────────────────────────────
 const apiRouter = new Router();
 registerAllRoutes(apiRouter);
 
 // ── AWS API server (port 4566) ─────────────────────────────────────────────
+// CORS, body parsing, and the cross-origin gate all live in the shared
+// middleware/http.js so tests/helpers/server.js can use the exact same path.
 const awsServer = http.createServer(async (req, res) => {
-  // CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, HEAD, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Amz-Target, X-Amz-Date, X-Amz-Security-Token, X-Amz-Content-Sha256, X-Api-Key, X-Amz-User-Agent');
-  res.setHeader('Access-Control-Expose-Headers', 'ETag, x-amz-request-id, x-amz-id-2, x-amz-version-id');
-  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+  if (!applyCors(req, res)) return;
+  await attachBody(req);
 
-  // Parse body once — handlers read req.rawBody (string) / req.rawBuffer (Buffer) / req.parsedBody (JSON)
-  req.rawBuffer = await readBody(req);
-  req.rawBody = req.rawBuffer.toString();
-  req.parsedBody = (() => { try { return JSON.parse(req.rawBody); } catch { return {}; } })();
-
-  // Try internal UI routes first, then AWS dispatch
   const matched = await apiRouter.dispatch(req, res);
   if (!matched) await dispatchAWS(req, res);
 });
@@ -78,9 +62,18 @@ const uiServer = http.createServer((req, res) => {
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   const url = new URL(req.url, 'http://localhost');
-  let filePath = path.join(uiDistDir, url.pathname === '/' ? 'index.html' : url.pathname);
-  if (!existsSync(filePath) || !filePath.startsWith(uiDistDir))
+  // Containment via safeJoin: the old startsWith check ran on an un-normalised
+  // path, so a request like `/../etc/passwd` could escape uiDistDir on Windows
+  // because path.join collapses .. before the check ran. safeJoin resolves
+  // both sides first and rejects via throw.
+  let filePath;
+  try {
+    filePath = url.pathname === '/' ? path.join(uiDistDir, 'index.html')
+                                    : safeJoin(uiDistDir, url.pathname.replace(/^\/+/, ''));
+  } catch {
     filePath = path.join(uiDistDir, 'index.html');
+  }
+  if (!existsSync(filePath)) filePath = path.join(uiDistDir, 'index.html');
 
   try {
     const ext = path.extname(filePath);
@@ -154,3 +147,13 @@ uiServer.listen(UI_PORT, HOST);
 
 process.on('SIGTERM', () => { awsServer.close(); uiServer.close(); process.exit(0); });
 process.on('SIGINT', () => { awsServer.close(); uiServer.close(); process.exit(0); });
+
+// Belt-and-braces: log async throws / unhandled rejections from request
+// handling but don't let them terminate the daemon. The router already wraps
+// the known synchronous decode path; this catches anything new that surfaces.
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+});

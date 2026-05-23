@@ -1,6 +1,10 @@
 // tests/helpers/server.js
 // Spins up MockCloud's AWS handler on an ephemeral port for tests.
 // No UI server, no Docker probe, no banner — just the AWS dispatch layer.
+//
+// Imports CORS + body parsing from src/middleware/http.js so tests run the
+// same code path as production. Duplicating that logic here previously meant
+// tests could pass while the production gate had a bug.
 
 import http from 'http';
 import os from 'os';
@@ -10,14 +14,7 @@ import { store } from '../../src/store.js';
 import { Router } from '../../src/router.js';
 import { dispatchAWS } from '../../src/dispatcher.js';
 import { registerAllRoutes } from '../../src/routes/index.js';
-
-function readBody(req) {
-  return new Promise(resolve => {
-    const chunks = [];
-    req.on('data', d => chunks.push(d));
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-  });
-}
+import { applyCors, attachBody } from '../../src/middleware/http.js';
 
 // Give tests their own isolated S3 root so disk hydration doesn't bleed between runs
 const TEST_S3_ROOT = path.join(os.tmpdir(), `mockcloud-test-${process.pid}`);
@@ -32,14 +29,8 @@ export async function startServer() {
   registerAllRoutes(apiRouter);
 
   const server = http.createServer(async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, HEAD, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Amz-Target, X-Amz-Date, X-Amz-Security-Token, X-Amz-Content-Sha256, X-Api-Key, X-Amz-User-Agent');
-    if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
-
-    req.rawBuffer = await readBody(req);
-    req.rawBody = req.rawBuffer.toString();
-    req.parsedBody = (() => { try { return JSON.parse(req.rawBody); } catch { return {}; } })();
+    if (!applyCors(req, res)) return;
+    await attachBody(req);
 
     const matched = await apiRouter.dispatch(req, res);
     if (!matched) await dispatchAWS(req, res);

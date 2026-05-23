@@ -27,12 +27,21 @@ export class Router {
       const m = url.pathname.match(route.re);
       if (!m) continue;
 
-      req.params = {};
-      route.keys.forEach((k, i) => { req.params[k] = decodeURIComponent(m[i + 1]); });
-
+      // decodeURIComponent throws URIError on malformed % escapes ("%", "%G").
+      // Decoding inside the try/catch turns that into a 400 instead of an
+      // unhandledRejection that kills the daemon.
       try {
+        req.params = {};
+        route.keys.forEach((k, i) => { req.params[k] = decodeURIComponent(m[i + 1]); });
         await route.handler(req, res);
       } catch (e) {
+        if (e instanceof URIError) {
+          if (!res.headersSent) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ __type: 'BadRequest', message: 'malformed URL parameter' }));
+          }
+          return true;
+        }
         console.error('[Router] Handler error:', e);
         if (!res.headersSent) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
