@@ -6,6 +6,31 @@
 import { store, randomId, arn } from '../store.js';
 import { jsonResponse, errorJson, getRawBody } from '../middleware/response.js';
 
+// Lookup helper that returns undefined for inherited properties. Plain
+// containers like {} inherit __proto__, constructor, prototype from
+// Object.prototype, so api.integrations['__proto__'] returns Object.prototype
+// itself. Combined with Object.assign(target, payload) that's a one-shot
+// prototype pollution. hasOwn-gated lookups close that.
+function ownLookup(container, key) {
+  if (typeof key !== 'string') return undefined;
+  return Object.hasOwn(container, key) ? container[key] : undefined;
+}
+
+// Strip dangerous keys from a JSON payload before merging it into a stored
+// object. JSON.parse on user input can produce { __proto__: {...} }, and
+// while Object.assign({}, that).__proto__ doesn't actually pollute (the
+// setter routes it through the accessor), an explicit filter is documentary
+// and shields future code paths.
+const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+function safePayload(payload) {
+  if (!payload || typeof payload !== 'object') return {};
+  const out = {};
+  for (const k of Object.keys(payload)) {
+    if (!DANGEROUS_KEYS.has(k)) out[k] = payload[k];
+  }
+  return out;
+}
+
 // Ensure v2 namespace exists in store
 function getV2Store() {
   if (!store.apigateway.v2) {
@@ -99,18 +124,18 @@ export async function handler(req, res) {
       return jsonResponse(res, 201, integration);
     }
     if (method === 'GET' && subId) {
-      const i = api.integrations[subId];
+      const i = ownLookup(api.integrations, subId);
       if (!i) return errorJson(res, 404, 'NotFoundException', 'Integration not found');
       return jsonResponse(res, 200, i);
     }
     if (method === 'DELETE' && subId) {
-      delete api.integrations[subId];
+      if (Object.hasOwn(api.integrations, subId)) delete api.integrations[subId];
       res.writeHead(204); res.end(); return;
     }
     if (method === 'PATCH' && subId) {
-      const i = api.integrations[subId];
+      const i = ownLookup(api.integrations, subId);
       if (!i) return errorJson(res, 404, 'NotFoundException', 'Integration not found');
-      Object.assign(i, payload);
+      Object.assign(i, safePayload(payload));
       return jsonResponse(res, 200, i);
     }
   }
@@ -128,21 +153,21 @@ export async function handler(req, res) {
     }
     if (method === 'GET' && subId) {
       const key = decodeURIComponent(subId);
-      const s = api.stages[key] || api.stages[subId];
+      const s = ownLookup(api.stages, key) || ownLookup(api.stages, subId);
       if (!s) return errorJson(res, 404, 'NotFoundException', 'Stage not found');
       return jsonResponse(res, 200, s);
     }
     if (method === 'DELETE' && subId) {
       const key = decodeURIComponent(subId);
-      delete api.stages[key];
-      delete api.stages[subId];
+      if (Object.hasOwn(api.stages, key))   delete api.stages[key];
+      if (Object.hasOwn(api.stages, subId)) delete api.stages[subId];
       res.writeHead(204); res.end(); return;
     }
     if (method === 'PATCH' && subId) {
       const key = decodeURIComponent(subId);
-      const s = api.stages[key] || api.stages[subId];
+      const s = ownLookup(api.stages, key) || ownLookup(api.stages, subId);
       if (!s) return errorJson(res, 404, 'NotFoundException', 'Stage not found');
-      Object.assign(s, payload);
+      Object.assign(s, safePayload(payload));
       return jsonResponse(res, 200, s);
     }
   }
@@ -164,18 +189,18 @@ export async function handler(req, res) {
       return jsonResponse(res, 201, route);
     }
     if (method === 'GET' && subId) {
-      const r = api.routes[subId];
+      const r = ownLookup(api.routes, subId);
       if (!r) return errorJson(res, 404, 'NotFoundException', 'Route not found');
       return jsonResponse(res, 200, r);
     }
     if (method === 'PATCH' && subId) {
-      const r = api.routes[subId];
+      const r = ownLookup(api.routes, subId);
       if (!r) return errorJson(res, 404, 'NotFoundException', 'Route not found');
-      Object.assign(r, payload);
+      Object.assign(r, safePayload(payload));
       return jsonResponse(res, 200, r);
     }
     if (method === 'DELETE' && subId) {
-      delete api.routes[subId];
+      if (Object.hasOwn(api.routes, subId)) delete api.routes[subId];
       res.writeHead(204); res.end(); return;
     }
   }

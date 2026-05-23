@@ -95,8 +95,12 @@ export function createSession(type, instanceId) {
   }
 
   sessions.set(id, session);
-  // Auto-expire after 30 min
-  setTimeout(() => { if (sessions.has(id)) { closeSession(id); } }, 30 * 60 * 1000);
+  // Auto-expire after 30 min. unref so the timer doesn't keep the Node
+  // process alive on its own — the HTTP server is what should hold the
+  // daemon open, not pending session-cleanup callbacks. Also lets test
+  // processes exit cleanly after creating a terminal session.
+  const expireTimer = setTimeout(() => { if (sessions.has(id)) { closeSession(id); } }, 30 * 60 * 1000);
+  expireTimer.unref?.();
   return id;
 }
 

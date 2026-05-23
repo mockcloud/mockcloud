@@ -2,6 +2,11 @@
 import { store, randomId, arn } from '../store.js';
 import { xmlResponse, errorXml, escapeXml, getRawBody } from '../middleware/response.js';
 
+// Strict allowlist for values that flow into the Docker CLI as labels/args.
+// Catches the injection vector even if a future code path drops the
+// execFile-vs-exec hardening in services/docker.js.
+const SAFE_EC2_ID = /^[A-Za-z0-9._-]{1,64}$/;
+
 const INSTANCE_TYPES = {
   't3.nano':  { vcpu:1, mem:0.5 },
   't3.micro': { vcpu:2, mem:1 },
@@ -133,6 +138,10 @@ export async function handler(req, res) {
     case 'RunInstances': {
       const type = params.get('InstanceType') || 't3.micro';
       const imageId = params.get('ImageId') || 'ami-ubuntu-22';
+      if (!SAFE_EC2_ID.test(type) || !SAFE_EC2_ID.test(imageId)) {
+        return xmlResponse(res, 400, ec2Wrap('ErrorResponse',
+          '<Errors><Error><Code>InvalidParameterValue</Code><Message>InstanceType and ImageId must match [A-Za-z0-9._-]{1,64}</Message></Error></Errors>'));
+      }
       const count = parseInt(params.get('MaxCount') || '1');
       const nameTag = params.get('TagSpecification.1.Tag.1.Value') || params.get('TagSpecification.1.Tag.2.Value') || 'unnamed';
       const pubIp = params.get('AssociatePublicIpAddress') !== 'false';

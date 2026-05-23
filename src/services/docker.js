@@ -1,10 +1,16 @@
 // services/docker.js — Docker Desktop integration for EC2 instances
 // Uses Docker Engine API via named pipe (Windows) or unix socket (Mac/Linux)
 // Falls back gracefully if Docker is not available.
-import { exec } from 'child_process';
+//
+// We invoke the docker CLI with execFile (argv array) rather than exec (shell
+// command string) so attacker-controlled instance metadata (type, ami, os…)
+// becomes a literal argument and can't break out of quoting. The API-boundary
+// validators in src/services/ec2.js and src/routes/ec2.js are a defense layer
+// on top of this — both must be defeated to land an injection.
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // Map AMI IDs → real Docker images
 const AMI_TO_IMAGE = {
@@ -17,6 +23,14 @@ const AMI_TO_IMAGE = {
 // Default image if AMI not found
 const DEFAULT_IMAGE = 'ubuntu:22.04';
 
+// Sanitize a label value: docker labels are key=value, value can contain
+// almost anything but we strip control chars + '"' just to keep `docker ps`
+// output readable. Crucially, none of this matters for security — execFile
+// hands the string to the kernel as a single argv element, no shell parsing.
+function labelValue(v) {
+  return String(v ?? '').replace(/[\x00-\x1f"]/g, '');
+}
+
 /**
  * Spin up a Docker container that represents an EC2 instance.
  * Returns the container ID (short) on success.
@@ -26,41 +40,37 @@ export async function spawnDockerContainer(instance) {
   const image = AMI_TO_IMAGE[instance.ami] || DEFAULT_IMAGE;
   const containerName = `mc-ec2-${instance.id}`;
 
-  // Labels for easy identification and restart reconciliation.
-  // Values are double-quoted so spaces (e.g. in OS names) don't break the shell command.
-  // The reconciler reads either `mc-*` (current) or legacy `lc-*` labels for
-  // backward compatibility with containers created by older mockcloud builds.
+  // Each --label is two argv tokens. The reconciler reads either `mc-*`
+  // (current) or legacy `lc-*` labels for backward compatibility with
+  // containers created by older mockcloud builds.
   const labels = [
-    `--label "mockcloud=ec2"`,
-    `--label "mc-instance-id=${instance.id}"`,
-    `--label "mc-name=${instance.name.replace(/[^a-zA-Z0-9_.-]/g,'-')}"`,
-    `--label "mc-type=${instance.type}"`,
-    `--label "mc-ami=${instance.ami}"`,
-    `--label "mc-os=${(instance.os||'').replace(/"/g,'')}"`,
-    `--label "mc-private-ip=${instance.privateIp}"`,
-    `--label "mc-public-ip=${instance.publicIp||''}"`,
-    `--label "mc-vcpu=${instance.vcpu}"`,
-    `--label "mc-mem=${instance.mem}"`,
-    `--label "mc-launched=${instance.launched}"`,
-  ].join(' ');
+    ['mockcloud', 'ec2'],
+    ['mc-instance-id', instance.id],
+    ['mc-name', instance.name.replace(/[^a-zA-Z0-9_.-]/g, '-')],
+    ['mc-type', instance.type],
+    ['mc-ami', instance.ami],
+    ['mc-os', instance.os || ''],
+    ['mc-private-ip', instance.privateIp],
+    ['mc-public-ip', instance.publicIp || ''],
+    ['mc-vcpu', instance.vcpu],
+    ['mc-mem', instance.mem],
+    ['mc-launched', instance.launched],
+  ].flatMap(([k, v]) => ['--label', `${k}=${labelValue(v)}`]);
 
-  // Run container — detached, no port mapping by default
-  // `tail -f /dev/null` keeps it alive without doing anything
-  const cmd = `docker run -d --name ${containerName} ${labels} ${image} tail -f /dev/null`;
+  // detached, no port mapping; `tail -f /dev/null` keeps it alive doing nothing
+  const args = ['run', '-d', '--name', containerName, ...labels, image, 'tail', '-f', '/dev/null'];
 
   try {
-    const { stdout } = await execAsync(cmd, { timeout: 30000 });
+    const { stdout } = await execFileAsync('docker', args, { timeout: 30000 });
     const fullId = stdout.trim();
     const shortId = fullId.slice(0, 12);
     console.log(`[EC2→Docker] Launched container ${containerName} (${shortId}) image=${image}`);
     return shortId;
   } catch (err) {
-    // Common cases: Docker not running, image not found locally (would need pull)
-    // Try pulling the image first if "Unable to find image" error
     if (err.message.includes('Unable to find image') || err.message.includes('pull')) {
       console.log(`[EC2→Docker] Pulling image ${image}…`);
-      await execAsync(`docker pull ${image}`, { timeout: 120000 });
-      const { stdout } = await execAsync(cmd, { timeout: 30000 });
+      await execFileAsync('docker', ['pull', image], { timeout: 120000 });
+      const { stdout } = await execFileAsync('docker', args, { timeout: 30000 });
       const shortId = stdout.trim().slice(0, 12);
       console.log(`[EC2→Docker] Launched after pull: ${containerName} (${shortId})`);
       return shortId;
@@ -75,16 +85,16 @@ export async function spawnDockerContainer(instance) {
  */
 export async function dockerAction(containerId, action) {
   if (!containerId) return;
-  const cmds = {
-    stop:      `docker stop ${containerId}`,
-    start:     `docker start ${containerId}`,
-    reboot:    `docker restart ${containerId}`,
-    terminate: `docker rm -f ${containerId}`,
+  const argsByAction = {
+    stop:      ['stop', containerId],
+    start:     ['start', containerId],
+    reboot:    ['restart', containerId],
+    terminate: ['rm', '-f', containerId],
   };
-  const cmd = cmds[action];
-  if (!cmd) return;
+  const args = argsByAction[action];
+  if (!args) return;
   try {
-    await execAsync(cmd, { timeout: 15000 });
+    await execFileAsync('docker', args, { timeout: 15000 });
     console.log(`[EC2→Docker] ${action} ${containerId} OK`);
   } catch (e) {
     console.warn(`[EC2→Docker] ${action} ${containerId} failed: ${e.message.split('\n')[0]}`);
@@ -92,12 +102,12 @@ export async function dockerAction(containerId, action) {
 }
 
 /**
- * List all Local Cloud EC2 containers currently running in Docker.
+ * List all MockCloud EC2 containers currently running in Docker.
  */
 export async function listDockerEC2Containers() {
   try {
-    const { stdout } = await execAsync(
-      `docker ps -a --filter "label=mockcloud=ec2" --format "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}"`,
+    const { stdout } = await execFileAsync('docker',
+      ['ps', '-a', '--filter', 'label=mockcloud=ec2', '--format', '{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'],
       { timeout: 5000 }
     );
     return stdout.trim().split('\n').filter(Boolean).map(line => {
@@ -115,15 +125,15 @@ export async function listDockerEC2Containers() {
  */
 export async function reconcileDockerInstances(store) {
   try {
-    const { stdout: listOut } = await execAsync(
-      `docker ps -a --filter "label=mockcloud=ec2" --format "{{.ID}}"`,
+    const { stdout: listOut } = await execFileAsync('docker',
+      ['ps', '-a', '--filter', 'label=mockcloud=ec2', '--format', '{{.ID}}'],
       { timeout: 5000 }
     );
     const containerIds = listOut.trim().split('\n').filter(Boolean);
     if (!containerIds.length) return;
 
-    const { stdout: inspectOut } = await execAsync(
-      `docker inspect ${containerIds.join(' ')}`,
+    const { stdout: inspectOut } = await execFileAsync('docker',
+      ['inspect', ...containerIds],
       { timeout: 10000 }
     );
     const containers = JSON.parse(inspectOut);
