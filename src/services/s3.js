@@ -23,8 +23,19 @@ import {
   mkdirSync, writeFileSync, readFileSync, existsSync,
   rmSync, renameSync, statSync, readdirSync,
 } from 'fs';
+import { safeJoin } from '../middleware/http.js';
 
 const S3_ROOT = process.env.MOCKCLOUD_S3_ROOT || path.join(os.homedir(), '.mockcloud', 's3');
+
+// AWS bucket-naming rules: 3–63 chars, lowercase alphanumerics, dots and
+// hyphens, must start and end with alphanumeric. This is the primary defense
+// against bucket names like '../..' that would escape S3_ROOT when joined.
+// safeJoin (below) is the belt-and-braces backup if a bad name ever slips
+// through.
+export const BUCKET_NAME_RE = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
+export function isValidBucketName(name) {
+  return typeof name === 'string' && BUCKET_NAME_RE.test(name);
+}
 
 // On startup, hydrate store.s3.buckets from disk. Idempotent.
 hydrateFromDisk();
@@ -112,6 +123,9 @@ export async function handler(req, res) {
     url.searchParams.has('versions') || url.searchParams.has('notification') ||
     url.searchParams.has('uploads');
   if (method === 'PUT' && !objectKey && !hasSubResource) {
+    if (!isValidBucketName(bucketName)) {
+      return s3Error(res, 400, 'InvalidBucketName', 'Bucket name does not match AWS naming rules');
+    }
     if (store.s3.buckets[bucketName]) {
       return s3Error(res, 409, 'BucketAlreadyOwnedByYou', `Bucket ${bucketName} already exists`);
     }
@@ -128,7 +142,7 @@ export async function handler(req, res) {
       publicAccessBlock: { blockPublicAcls: true, ignorePublicAcls: true, blockPublicPolicy: true, restrictPublicBuckets: true },
       versioning: 'Suspended',
     };
-    mkdirSync(path.join(S3_ROOT, bucketName), { recursive: true });
+    mkdirSync(safeJoin(S3_ROOT, bucketName), { recursive: true });
     store.addTrail({ method: 'PUT', path: `/s3/${bucketName}`, status: 200, latency: 2 });
     res.setHeader('Location', `/${bucketName}`);
     return xmlResponse(res, 200, '');
@@ -312,7 +326,7 @@ export async function handler(req, res) {
       return s3Error(res, 409, 'BucketNotEmpty', 'The bucket you tried to delete is not empty');
     }
     delete store.s3.buckets[bucketName];
-    try { rmSync(path.join(S3_ROOT, bucketName), { recursive: true, force: true }); } catch {}
+    try { rmSync(safeJoin(S3_ROOT, bucketName), { recursive: true, force: true }); } catch {}
     store.addTrail({ method: 'DELETE', path: `/s3/${bucketName}`, status: 204, latency: 1 });
     res.writeHead(204); res.end();
     return;
@@ -703,11 +717,12 @@ export function putObjectToBucket(bucketName, key, buf, contentType, metadata = 
 
 // ── Disk persistence helpers ───────────────────────────────────────────────
 // Keys can contain '/'. We mirror that into the directory tree on disk.
-// We don't sanitize the key beyond preventing `..` escape — S3 allows almost
-// any character in keys, and this is a local dev tool listening on 127.0.0.1.
+// safeJoin ensures the resolved path stays inside S3_ROOT even if bucket or
+// key contain traversal sequences — bucket-name validation in the create
+// handler is the first line of defense; this is the second.
 function diskPath(bucket, key) {
   const safeKey = key.split('/').map(p => p === '..' ? '__' : p).join('/');
-  return path.join(S3_ROOT, bucket, safeKey);
+  return safeJoin(S3_ROOT, bucket, safeKey);
 }
 
 function writeObjectToDisk(bucket, key, buf) {
@@ -766,8 +781,12 @@ function hydrateFromDisk() {
   for (const entry of bucketDirs) {
     if (!entry.isDirectory()) continue;
     const bucketName = entry.name;
+    // Skip directories whose names couldn't have been created through the API
+    // (e.g. left over from before bucket-name validation was enforced) so we
+    // don't resurrect a traversal-named bucket on restart.
+    if (!isValidBucketName(bucketName)) continue;
     if (store.s3.buckets[bucketName]) continue;
-    const bucketPath = path.join(S3_ROOT, bucketName);
+    const bucketPath = safeJoin(S3_ROOT, bucketName);
     const objects    = {};
     walkObjects(bucketPath, '', objects);
     store.s3.buckets[bucketName] = {

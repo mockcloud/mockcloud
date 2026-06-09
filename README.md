@@ -225,6 +225,65 @@ CI runs the full suite on every pull request (Node 18 & 20).
 
 ## Architecture
 
+MockCloud is a single Node process that runs two HTTP listeners. The `:4566` listener handles every AWS API call: it first tries the internal `/mockcloud/*` router (used by the console UI and tooling), then falls through to an AWS dispatcher that routes each call to one of 17 service handlers by `X-Amz-Target` header, `Action` parameter, or URL path. The `:4567` listener is a static file server for the prebuilt React console. All service state lives in a single in-memory `store`; S3 object bytes are additionally written to disk under `~/.mockcloud/s3/`, and EC2 in `vmm` mode delegates to the local Docker daemon.
+
+```mermaid
+flowchart LR
+    sdk["AWS SDK clients<br/>(any language)"]
+    browser["Console UI<br/>(browser)"]
+
+    subgraph daemon["mockcloud daemon — single Node process"]
+        direction TB
+        ui4567["Static UI server<br/>:4567"]
+        aws4566["AWS API listener<br/>:4566"]
+
+        internal["/mockcloud/* router<br/>health · status · trail<br/>reset · export · ec2/mode"]
+        dispatcher["AWS dispatcher<br/>routes by target / action / path"]
+
+        subgraph services["service handlers (17)"]
+            direction LR
+            sns["SNS"]
+            eb["EventBridge"]
+            ddbs["DynamoDB Streams"]
+            lambda["Lambda"]
+            sqs["SQS"]
+            s3svc["S3"]
+            ec2svc["EC2"]
+            others["10 other handlers<br/>dynamodb · iam · kms · ssm<br/>apigateway v1/v2 · ses<br/>secretsmanager<br/>stepfunctions · cognito"]
+        end
+
+        store[("In-memory store<br/>per-service state<br/>+ trail (cap 5000)")]
+    end
+
+    disk[("S3 objects on disk<br/>~/.mockcloud/s3/")]
+    docker["Local Docker daemon"]
+
+    sdk -->|HTTP| aws4566
+    browser -->|"/mockcloud/*"| aws4566
+    browser -->|static| ui4567
+
+    aws4566 --> internal
+    aws4566 --> dispatcher
+    internal --> store
+
+    dispatcher --> services
+    services --> store
+
+    sns -->|fan-out| lambda
+    sns -->|fan-out| sqs
+    eb -->|target| lambda
+    eb -->|target| sqs
+    eb -->|re-publish| sns
+    ddbs -->|trigger| lambda
+
+    s3svc <-->|persist / hydrate| disk
+    ec2svc -. "vmm mode" .-> docker
+```
+
+Solid edges are synchronous HTTP requests or in-process calls (the cross-service fan-out arrows fire in-process via a shared `invokeLambda` / `enqueueMessage` helper); the dotted edge marks the optional Docker integration, active only when EC2 is in `vmm` mode.
+
+### Source layout
+
 ```
 src/
 ├── index.js          — HTTP servers, body draining, CORS

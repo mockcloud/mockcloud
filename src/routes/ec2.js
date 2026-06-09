@@ -4,6 +4,10 @@ import { jsonResponse, errorJson } from '../middleware/response.js';
 
 const body = req => req.parsedBody || {};
 
+// Match the API-boundary regex in src/services/ec2.js. Both UI and AWS
+// surfaces funnel into spawnDockerContainer; both must validate.
+const SAFE_EC2_ID = /^[A-Za-z0-9._-]{1,64}$/;
+
 const TYPE_SPECS = {
   't3.nano': { vcpu: 1, mem: 0.5 },
   't3.micro': { vcpu: 2, mem: 1 },
@@ -28,6 +32,12 @@ export function registerEC2Routes(app) {
 
   app.post('/mockcloud/ec2/instances', (req, res) => {
     const { name, type, ami, assignPublicIp } = body(req);
+    if (type != null && !SAFE_EC2_ID.test(type)) {
+      return errorJson(res, 400, 'ValidationError', 'type must match [A-Za-z0-9._-]{1,64}');
+    }
+    if (ami != null && !SAFE_EC2_ID.test(ami)) {
+      return errorJson(res, 400, 'ValidationError', 'ami must match [A-Za-z0-9._-]{1,64}');
+    }
     const id = `i-${randomId(8)}`;
     const specs = TYPE_SPECS[type] || { vcpu: 1, mem: 1 };
     const instance = {

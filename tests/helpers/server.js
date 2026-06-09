@@ -1,6 +1,10 @@
 // tests/helpers/server.js
 // Spins up MockCloud's AWS handler on an ephemeral port for tests.
 // No UI server, no Docker probe, no banner — just the AWS dispatch layer.
+//
+// Imports CORS + body parsing from src/middleware/http.js so tests run the
+// same code path as production. Duplicating that logic here previously meant
+// tests could pass while the production gate had a bug.
 
 // test-env MUST be first — it sets MOCKCLOUD_S3_ROOT / MOCKCLOUD_DYNAMODB_ROOT
 // before the service modules below capture them at load time.
@@ -12,17 +16,10 @@ import { Router } from '../../src/router.js';
 import { dispatchAWS } from '../../src/dispatcher.js';
 import { registerAllRoutes } from '../../src/routes/index.js';
 import { sendInternalError } from '../../src/middleware/response.js';
+import { applyCors, attachBody } from '../../src/middleware/http.js';
 import { sigv4Enabled, verifySigV4, sendSigV4Error } from '../../src/middleware/sigv4.js';
 import { iamMode, enforceIam, sendIamError } from '../../src/iam/policy-eval.js';
 import { startBackground, stopBackground } from '../../src/lifecycle.js';
-
-function readBody(req) {
-  return new Promise(resolve => {
-    const chunks = [];
-    req.on('data', d => chunks.push(d));
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-  });
-}
 
 // Isolated storage roots (set in test-env.js) — create them up front.
 mkdirSync(TEST_S3_ROOT, { recursive: true });
@@ -33,16 +30,9 @@ export async function startServer() {
   registerAllRoutes(apiRouter);
 
   const server = http.createServer(async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, HEAD, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Amz-Target, X-Amz-Date, X-Amz-Security-Token, X-Amz-Content-Sha256, X-Api-Key, X-Amz-User-Agent');
-    // Match the daemon: only short-circuit OPTIONS for the UI control plane so
-    // S3 CORS preflight (OPTIONS to a bucket) reaches the S3 handler.
-    if (req.method === 'OPTIONS' && req.url.startsWith('/mockcloud')) { res.writeHead(204); res.end(); return; }
-
-    req.rawBuffer = await readBody(req);
-    req.rawBody = req.rawBuffer.toString();
-    req.parsedBody = (() => { try { return JSON.parse(req.rawBody); } catch { return {}; } })();
+    // Shared CORS + cross-origin gate + body parsing (same path as production).
+    if (!applyCors(req, res)) return;
+    await attachBody(req);
 
     try {
       const matched = await apiRouter.dispatch(req, res);

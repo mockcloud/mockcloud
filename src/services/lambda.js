@@ -18,6 +18,47 @@ import { tmpdir } from 'os';
 import path from 'path';
 import zlib from 'zlib';
 
+// Hard cap for the runner's source size and for what we accept out of inflate.
+// Aligns with the slice in extractZip / decodeUploadedCode.
+const CODE_SIZE_CAP = 256 * 1024;
+
+// Handler form is "<file>.<exported-function>"; restrict to printable ASCII so
+// it can't smuggle path separators into the filename we open or odd chars
+// into the runner template.
+const HANDLER_RE = /^[A-Za-z0-9_.-]{1,128}$/;
+
+// Env-var filter for Lambda Environment.Variables. The previous behaviour
+// spread process.env then fn.env into the spawned child, so an attacker who
+// uploaded a function could set NODE_OPTIONS=--require=/path/to/payload.js
+// and trigger arbitrary host code execution on every invocation. We now:
+//   - run the child with process.execPath (no PATH lookup)
+//   - hand the child only a minimal env
+//   - filter fn.env keys against a denylist that blocks any Node/runtime hook
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const ENV_KEY_DENY = /^(NODE_OPTIONS|NODE_PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_.*|PATH|PATHEXT|SYSTEMROOT|COMSPEC)$/i;
+function buildChildEnv(userEnv) {
+  // Start from a minimal set the Node runtime actually needs.
+  const out = {};
+  if (process.platform === 'win32') {
+    for (const k of ['SystemRoot', 'TEMP', 'TMP', 'USERPROFILE']) {
+      if (process.env[k]) out[k] = process.env[k];
+    }
+  } else {
+    for (const k of ['HOME', 'TMPDIR']) {
+      if (process.env[k]) out[k] = process.env[k];
+    }
+  }
+  // Merge filtered user env last; keys must look like env vars and not be on
+  // the denylist.
+  for (const [k, v] of Object.entries(userEnv || {})) {
+    if (typeof k !== 'string' || typeof v !== 'string') continue;
+    if (!ENV_KEY_RE.test(k) || ENV_KEY_DENY.test(k)) continue;
+    if (v.includes('\0')) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 export async function handler(req, res) {
   const url    = new URL(req.url, 'http://localhost');
   const parts  = url.pathname.split('/').filter(Boolean);
@@ -51,6 +92,10 @@ export async function handler(req, res) {
     if (store.lambda.functions[name]) {
       return errorJson(res, 409, 'ResourceConflictException', `Function already exists: ${name}`);
     }
+    const handlerName = payload.Handler || 'index.handler';
+    if (!HANDLER_RE.test(handlerName)) {
+      return errorJson(res, 400, 'ValidationException', 'Handler must match [A-Za-z0-9_.-]{1,128}');
+    }
     // Honour Code.ZipFile (base64 zip OR raw base64 source). Most AWS SDKs
     // ship a real zip; some hand-rolled clients send a single source file
     // base64'd. Try zip first, fall back to treating it as plain bytes.
@@ -58,7 +103,7 @@ export async function handler(req, res) {
     store.lambda.functions[name] = {
       name,
       runtime:     payload.Runtime || 'nodejs20.x',
-      handler:     payload.Handler || 'index.handler',
+      handler:     handlerName,
       role:        payload.Role || '',
       memory:      payload.MemorySize || 128,
       timeout:     payload.Timeout || 3,
@@ -327,14 +372,14 @@ function safeParse(s) { try { return JSON.parse(s); } catch { return s; } }
 function decodeUploadedCode(codeField) {
   if (!codeField) return '';
   // Already a string — store directly (size-capped)
-  if (typeof codeField === 'string') return codeField.slice(0, 256 * 1024);
+  if (typeof codeField === 'string') return codeField.slice(0, CODE_SIZE_CAP);
   // { ZipFile: <base64> }
   if (codeField.ZipFile) {
     const buf = Buffer.from(codeField.ZipFile, 'base64');
     const fromZip = extractZip(buf);
     if (fromZip) return fromZip;
     // Treat as raw source if zip extraction failed
-    return buf.toString('utf8').slice(0, 256 * 1024);
+    return buf.toString('utf8').slice(0, CODE_SIZE_CAP);
   }
   // { S3Bucket, S3Key } — not supported, return placeholder
   return '';
@@ -381,6 +426,11 @@ function extractZip(buf) {
     const target = matches[0];
     if (!target) return null;
 
+    // Decline before allocating if the central directory advertises a payload
+    // larger than our cap. Pure size-claim check; catches the obvious "header
+    // says 1 GB" decompression bomb.
+    if (target.uncompSize > CODE_SIZE_CAP) return null;
+
     // Read local file header to find data start
     const lh = target.localOffset;
     if (buf.readUInt32LE(lh) !== 0x04034b50) return null;
@@ -391,33 +441,34 @@ function extractZip(buf) {
     const compressed = buf.slice(dataStart, dataEnd);
 
     let raw;
-    if (target.method === 0) raw = compressed;
-    else if (target.method === 8) raw = zlib.inflateRawSync(compressed);
+    if (target.method === 0) raw = compressed.slice(0, CODE_SIZE_CAP);
+    // maxOutputLength makes the inflate abort with an error long before
+    // exhausting memory on a malicious payload that lied about uncompSize.
+    else if (target.method === 8) raw = zlib.inflateRawSync(compressed, { maxOutputLength: CODE_SIZE_CAP });
     else return null;
 
-    return raw.toString('utf8').slice(0, 256 * 1024);
+    return raw.toString('utf8').slice(0, CODE_SIZE_CAP);
   } catch {
     return null;
   }
 }
 
-// Minimal environment for the sandbox. We deliberately do NOT forward the full
-// host process.env — that would leak the operator's AWS credentials, tokens and
-// other secrets into arbitrary user code. Only OS essentials (so `node` can
-// start) plus standard Lambda vars and the function's own Environment.Variables.
-const OS_ENV_PASSTHROUGH = ['PATH', 'PATHEXT', 'SystemRoot', 'windir', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'LANG', 'LC_ALL'];
+// Environment for the sandbox. We deliberately do NOT forward the full host
+// process.env — that would leak the operator's AWS credentials/tokens into
+// arbitrary user code. buildChildEnv gives a minimal OS base plus the
+// function's own Environment.Variables AFTER filtering out runtime-hook keys
+// (NODE_OPTIONS, LD_*, DYLD_*, PATH, …) that would otherwise allow host RCE.
+// On top of that we layer the standard AWS Lambda runtime vars; setting them
+// last means fn.env can't spoof them.
 function lambdaEnv(fn) {
-  const env = {};
-  for (const k of OS_ENV_PASSTHROUGH) if (process.env[k] !== undefined) env[k] = process.env[k];
-  Object.assign(env, {
-    AWS_REGION:                      process.env.AWS_REGION || 'us-east-1',
-    AWS_DEFAULT_REGION:              process.env.AWS_DEFAULT_REGION || 'us-east-1',
-    AWS_LAMBDA_FUNCTION_NAME:        fn.name,
-    AWS_LAMBDA_FUNCTION_VERSION:     '$LATEST',
-    AWS_LAMBDA_FUNCTION_MEMORY_SIZE: String(fn.memory || 128),
-    AWS_EXECUTION_ENV:               `AWS_Lambda_${fn.runtime || 'nodejs'}`,
-    _HANDLER:                        fn.handler || 'index.handler',
-  }, fn.env || {});
+  const env = buildChildEnv(fn.env);
+  env.AWS_REGION                      = process.env.AWS_REGION || 'us-east-1';
+  env.AWS_DEFAULT_REGION              = process.env.AWS_DEFAULT_REGION || 'us-east-1';
+  env.AWS_LAMBDA_FUNCTION_NAME        = fn.name;
+  env.AWS_LAMBDA_FUNCTION_VERSION     = '$LATEST';
+  env.AWS_LAMBDA_FUNCTION_MEMORY_SIZE = String(fn.memory || 128);
+  env.AWS_EXECUTION_ENV               = `AWS_Lambda_${fn.runtime || 'nodejs'}`;
+  env._HANDLER                        = fn.handler || 'index.handler';
   return env;
 }
 
@@ -445,7 +496,13 @@ Promise.resolve(handler(event, {})).then(r => {
 `;
       writeFileSync(path.join(tmpDir, 'runner.js'), runner);
       const timeoutMs = Math.max(1000, (fn.timeout || 3) * 1000);
-      execFile('node', ['runner.js', payload], { cwd: tmpDir, timeout: timeoutMs, env: lambdaEnv(fn) }, (err, stdout, stderr) => {
+      // process.execPath is the absolute path to the running Node binary, so we
+      // don't rely on PATH lookup and a tampered PATH (from fn.env) can't pivot
+      // us to another executable. lambdaEnv builds the child env from the
+      // hardened buildChildEnv (minimal base + fn.env filtered against
+      // NODE_OPTIONS/LD_*/DYLD_*/PATH/…) and layers the AWS_LAMBDA_* runtime
+      // vars on top.
+      execFile(process.execPath, ['runner.js', payload], { cwd: tmpDir, timeout: timeoutMs, env: lambdaEnv(fn) }, (err, stdout, stderr) => {
         try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
         if (err) return reject(new Error(stderr || err.message));
         resolve(stdout || 'null');
