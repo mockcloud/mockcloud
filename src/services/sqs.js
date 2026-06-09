@@ -77,10 +77,14 @@ export async function handler(req, res) {
       const url = params.get('QueueUrl');
       const q = store.sqs.queues[url];
       if (!q) return errorXml(res, 400, 'AWS.SimpleQueueService.NonExistentQueue', 'Queue not found');
+      if (q.type === 'fifo' && !params.get('MessageGroupId')) {
+        return errorXml(res, 400, 'MissingParameter', 'The request must contain the parameter MessageGroupId.');
+      }
       const msgBody = params.get('MessageBody') || '';
-      const msg = enqueueMessage(url, msgBody, { dedupeId: params.get('MessageDeduplicationId') });
+      const msg = enqueueMessage(url, msgBody, { dedupeId: params.get('MessageDeduplicationId'), groupId: params.get('MessageGroupId') });
+      const seqXml = q.type === 'fifo' ? `<SequenceNumber>${msg.sequenceNumber}</SequenceNumber>` : '';
       return xmlResponse(res, 200, sqsWrap('SendMessageResponse','SendMessageResult',
-        `<MessageId>${msg.id}</MessageId><MD5OfMessageBody>${md5(msgBody)}</MD5OfMessageBody>`));
+        `<MessageId>${msg.id}</MessageId><MD5OfMessageBody>${md5(msgBody)}</MD5OfMessageBody>${seqXml}`));
     }
     case 'ReceiveMessage': {
       const url = params.get('QueueUrl');
@@ -88,7 +92,7 @@ export async function handler(req, res) {
       if (!q) return errorXml(res, 400, 'AWS.SimpleQueueService.NonExistentQueue', 'Queue not found');
       const maxMsgs = parseInt(params.get('MaxNumberOfMessages') || '1');
       const visMs = (parseInt(params.get('VisibilityTimeout') || '30')) * 1000;
-      const msgs = q.messages.filter(m => m.visible).slice(0, maxMsgs);
+      const msgs = selectMessages(q, maxMsgs);
       msgs.forEach(m => hideMessage(m, visMs));
       const xml = msgs.map(m =>
         `<Message><MessageId>${m.id}</MessageId><ReceiptHandle>${m.receiptHandle}</ReceiptHandle><Body>${escapeXml(m.body)}</Body><MD5OfBody>${md5(m.body)}</MD5OfBody></Message>`
@@ -195,9 +199,14 @@ function handleJsonProtocol(req, res, action, payload) {
       const url = payload.QueueUrl;
       const q = store.sqs.queues[url];
       if (!q) return jsonResponse(res, 400, { __type: 'QueueDoesNotExist', message: 'Queue not found' });
+      if (q.type === 'fifo' && !payload.MessageGroupId) {
+        return jsonResponse(res, 400, { __type: 'MissingParameter', message: 'The request must contain the parameter MessageGroupId.' });
+      }
       const msgBody = payload.MessageBody || '';
-      const msg = enqueueMessage(url, msgBody, { dedupeId: payload.MessageDeduplicationId });
-      return jsonResponse(res, 200, { MessageId: msg.id, MD5OfMessageBody: md5(msgBody) });
+      const msg = enqueueMessage(url, msgBody, { dedupeId: payload.MessageDeduplicationId, groupId: payload.MessageGroupId });
+      const out = { MessageId: msg.id, MD5OfMessageBody: md5(msgBody) };
+      if (q.type === 'fifo') out.SequenceNumber = msg.sequenceNumber;
+      return jsonResponse(res, 200, out);
     }
     case 'ReceiveMessage': {
       const url = payload.QueueUrl;
@@ -205,10 +214,13 @@ function handleJsonProtocol(req, res, action, payload) {
       if (!q) return jsonResponse(res, 400, { __type: 'QueueDoesNotExist', message: 'Queue not found' });
       const maxMsgs = payload.MaxNumberOfMessages || 1;
       const visMs = (payload.VisibilityTimeout ?? 30) * 1000;
-      const msgs = q.messages.filter(m => m.visible).slice(0, maxMsgs);
+      const msgs = selectMessages(q, maxMsgs);
       msgs.forEach(m => hideMessage(m, visMs));
       return jsonResponse(res, 200, {
-        Messages: msgs.map(m => ({ MessageId: m.id, ReceiptHandle: m.receiptHandle, Body: m.body, MD5OfBody: md5(m.body) }))
+        Messages: msgs.map(m => ({
+          MessageId: m.id, ReceiptHandle: m.receiptHandle, Body: m.body, MD5OfBody: md5(m.body),
+          ...(q.type === 'fifo' ? { Attributes: { MessageGroupId: m.groupId, SequenceNumber: m.sequenceNumber, ...(m.dedupeId ? { MessageDeduplicationId: m.dedupeId } : {}) } } : {}),
+        }))
       });
     }
     case 'DeleteMessage': {
@@ -226,16 +238,55 @@ function handleJsonProtocol(req, res, action, payload) {
 export function enqueueMessage(queueUrl, body, opts = {}) {
   const q = store.sqs.queues[queueUrl];
   if (!q) throw new Error(`Queue not found: ${queueUrl}`);
+  const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
   const msg = {
     id:            randomId(36),
     receiptHandle: randomId(64),
-    body:          typeof body === 'string' ? body : JSON.stringify(body),
+    body:          bodyStr,
     sent:          Date.now(),
     visible:       true,
     dedupeId:      opts.dedupeId || null,
   };
+
+  if (q.type === 'fifo') {
+    // Deduplication (5-min window): explicit MessageDeduplicationId, or a
+    // content hash when ContentBasedDeduplication is enabled. A duplicate is a
+    // no-op that returns the original message (same id + sequence number).
+    const dedupeKey = opts.dedupeId ||
+      (q.attributes?.ContentBasedDeduplication === 'true' ? md5(bodyStr) : null);
+    if (dedupeKey) {
+      if (!q.dedupe) q.dedupe = new Map();
+      const now = Date.now();
+      for (const [k, v] of q.dedupe) if (now - v.t > 300_000) q.dedupe.delete(k);
+      const hit = q.dedupe.get(dedupeKey);
+      if (hit) return hit.msg;
+      q.dedupe.set(dedupeKey, { msg, t: Date.now() });
+    }
+    q.seq = (q.seq || 0) + 1;
+    msg.groupId        = opts.groupId || 'mockcloud-default';
+    msg.sequenceNumber = String(q.seq).padStart(20, '0');
+  }
+
   q.messages.push(msg);
   return msg;
+}
+
+// Pick the messages a ReceiveMessage returns. Standard queues: the earliest
+// visible messages. FIFO: in sequence order, at most one per message group,
+// skipping any group with an in-flight (not-visible) message — preserving
+// per-group ordering while allowing parallelism across groups.
+function selectMessages(q, maxMsgs) {
+  if (q.type !== 'fifo') return q.messages.filter(m => m.visible).slice(0, maxMsgs);
+  const locked = new Set(q.messages.filter(m => !m.visible).map(m => m.groupId));
+  const chosen = [];
+  const used = new Set();
+  for (const m of q.messages) {
+    if (chosen.length >= maxMsgs) break;
+    if (!m.visible || locked.has(m.groupId) || used.has(m.groupId)) continue;
+    chosen.push(m);
+    used.add(m.groupId);
+  }
+  return chosen;
 }
 
 // Convenience: resolve an SQS ARN to its queue URL.

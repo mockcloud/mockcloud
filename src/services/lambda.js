@@ -62,6 +62,7 @@ export async function handler(req, res) {
       memory:      payload.MemorySize || 128,
       timeout:     payload.Timeout || 3,
       env:         payload.Environment?.Variables || {},
+      layers:      payload.Layers || [],
       code,
       invocations: 0,
       errors:      0,
@@ -135,6 +136,27 @@ export async function handler(req, res) {
     const fn = store.lambda.functions[fnName];
     if (!fn) return errorJson(res, 404, 'ResourceNotFoundException', `Function not found: ${fnName}`);
     fn.code = decodeUploadedCode(payload) || body.slice(0, 10240);
+    return jsonResponse(res, 200, fnConfig(fn));
+  }
+
+  // ── Get function configuration ─────────────────────────────────────────
+  if (method === 'GET' && fnName && action === 'configuration') {
+    const fn = store.lambda.functions[fnName];
+    if (!fn) return errorJson(res, 404, 'ResourceNotFoundException', `Function not found: ${fnName}`);
+    return jsonResponse(res, 200, fnConfig(fn));
+  }
+
+  // ── Update function configuration (timeout / memory / env / layers) ─────
+  if (method === 'PUT' && fnName && action === 'configuration') {
+    const fn = store.lambda.functions[fnName];
+    if (!fn) return errorJson(res, 404, 'ResourceNotFoundException', `Function not found: ${fnName}`);
+    if (payload.MemorySize !== undefined) fn.memory  = payload.MemorySize;
+    if (payload.Timeout    !== undefined) fn.timeout = payload.Timeout;
+    if (payload.Handler    !== undefined) fn.handler = payload.Handler;
+    if (payload.Runtime    !== undefined) fn.runtime = payload.Runtime;
+    if (payload.Role       !== undefined) fn.role    = payload.Role;
+    if (payload.Environment?.Variables)   fn.env     = payload.Environment.Variables;
+    if (payload.Layers     !== undefined) fn.layers  = payload.Layers;
     return jsonResponse(res, 200, fnConfig(fn));
   }
 
@@ -404,6 +426,7 @@ function fnConfig(fn) {
     PackageType:  'Zip',
     Architectures: ['x86_64'],
     Environment:  { Variables: fn.env },
+    Layers:       (fn.layers || []).map(a => ({ Arn: a, CodeSize: 0 })),
     TracingConfig: { Mode: 'PassThrough' },
     EphemeralStorage: { Size: 512 },
     LoggingConfig: { LogFormat: 'Text', LogGroup: `/aws/lambda/${fn.name}` },
