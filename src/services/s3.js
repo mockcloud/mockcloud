@@ -31,8 +31,11 @@ hydrateFromDisk();
 
 export async function handler(req, res) {
   const url       = new URL(req.url, 'http://localhost');
-  const pathParts = url.pathname.replace(/^\//, '').split('/').filter(Boolean);
   const method    = req.method;
+  // Virtual-hosted-style: bucket comes from the Host header, key is the full path.
+  const hostBucket = parseS3Host(req.headers.host);
+  const rawParts  = url.pathname.replace(/^\//, '').split('/').filter(Boolean);
+  const pathParts = hostBucket ? [hostBucket, ...rawParts] : rawParts;
 
   // ── Presigned-URL expiry ──────────────────────────────────────────────────
   // Only presigned requests carry X-Amz-Algorithm in the query string (header-
@@ -54,7 +57,7 @@ export async function handler(req, res) {
   }
 
   // ── List all buckets ────────────────────────────────────────────────────
-  if (method === 'GET' && url.pathname === '/') {
+  if (method === 'GET' && url.pathname === '/' && !hostBucket) {
     const buckets = Object.values(store.s3.buckets);
     return xmlResponse(res, 200,
       `<?xml version="1.0"?><ListAllMyBucketsResult><Buckets>${
@@ -332,6 +335,44 @@ export async function handler(req, res) {
       `<?xml version="1.0"?><ListMultipartUploadsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>${escapeXml(bucketName)}</Bucket><KeyMarker/><UploadIdMarker/><MaxUploads>1000</MaxUploads><IsTruncated>false</IsTruncated>${uploads}</ListMultipartUploadsResult>`);
   }
 
+  // ── Delete multiple objects (POST /?delete) ───────────────────────────────
+  if (method === 'POST' && !objectKey && url.searchParams.has('delete')) {
+    const bkt = store.s3.buckets[bucketName];
+    if (!bkt) return s3Error(res, 404, 'NoSuchBucket', `Bucket ${bucketName} does not exist`);
+    const raw = getRawBuffer(req).toString();
+    const quiet = /<Quiet>\s*true\s*<\/Quiet>/i.test(raw);
+    const deleted = [];
+    for (const m of raw.matchAll(/<Object>([\s\S]*?)<\/Object>/g)) {
+      const keyM = m[1].match(/<Key>([\s\S]*?)<\/Key>/);
+      if (!keyM) continue;
+      const key = xmlUnescape(keyM[1]);
+      const versionId = (m[1].match(/<VersionId>([\s\S]*?)<\/VersionId>/) || [])[1];
+      if (versionId) {
+        const hist = bkt.objectVersions?.[key];
+        const idx = hist ? hist.findIndex(v => v.versionId === versionId) : -1;
+        if (idx >= 0) {
+          hist.splice(idx, 1);
+          try { rmSync(versionDiskPath(bucketName, key, versionId), { force: true }); } catch {}
+          if (!hist.length) { delete bkt.objectVersions[key]; delete bkt.objects[key]; try { rmSync(diskPath(bucketName, key), { force: true }); } catch {} }
+          else if (idx === 0) bkt.objects[key] = hist[0];
+        }
+        deleted.push(`<Deleted><Key>${escapeXml(key)}</Key><VersionId>${versionId}</VersionId></Deleted>`);
+      } else if (bkt.versioning === 'Enabled') {
+        const marker = { key, isDeleteMarker: true, versionId: newVersionId(), modified: Date.now() };
+        if (!bkt.objectVersions) bkt.objectVersions = {};
+        bkt.objectVersions[key] = [marker, ...(bkt.objectVersions[key] || [])];
+        bkt.objects[key] = marker;
+        deleted.push(`<Deleted><Key>${escapeXml(key)}</Key><DeleteMarker>true</DeleteMarker><DeleteMarkerVersionId>${marker.versionId}</DeleteMarkerVersionId></Deleted>`);
+      } else {
+        delete bkt.objects[key];
+        try { rmSync(diskPath(bucketName, key), { force: true }); } catch {}
+        deleted.push(`<Deleted><Key>${escapeXml(key)}</Key></Deleted>`);
+      }
+      emitS3Event(bucketName, key, 's3:ObjectRemoved:Delete', { key });
+    }
+    return xmlResponse(res, 200, `<?xml version="1.0"?><DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">${quiet ? '' : deleted.join('')}</DeleteResult>`);
+  }
+
   // ── List objects (V1 + V2, paginated) ─────────────────────────────────────
   if (method === 'GET' && !objectKey) {
     const bucket = store.s3.buckets[bucketName];
@@ -493,18 +534,32 @@ export async function handler(req, res) {
         return s3Error(res, 404, 'NoSuchKey', 'The specified key does not exist.');
       }
     }
+    // Conditional preconditions (If-Match / If-None-Match / If-*-Since).
+    const cond = checkConditional(req, obj);
+    if (cond === 412) return s3Error(res, 412, 'PreconditionFailed', 'At least one of the preconditions you specified did not hold.');
+    if (cond === 304) { res.writeHead(304, { 'ETag': `"${obj.etag}"` }); res.end(); return; }
+
     let buf;
     try { buf = readVersionId ? readObjectVersionFromDisk(bucketName, objectKey, readVersionId) : readObjectFromDisk(bucketName, objectKey); }
     catch { return s3Error(res, 500, 'InternalError', 'Failed to read object body'); }
     const headers = {
       'Content-Type':   obj.contentType || 'application/octet-stream',
-      'Content-Length': buf.length,
       'ETag':           `"${obj.etag}"`,
       'Last-Modified':  new Date(obj.modified).toUTCString(),
+      'Accept-Ranges':  'bytes',
       ...metaHeaders(obj.metadata),
     };
     if (obj.versionId) headers['x-amz-version-id'] = obj.versionId;
-    res.writeHead(200, headers);
+
+    // Range GET → 206 partial content.
+    const range = parseRange(req.headers['range'], buf.length);
+    if (range === 'invalid') { res.writeHead(416, { 'Content-Range': `bytes */${buf.length}` }); res.end(); return; }
+    if (range) {
+      const slice = buf.subarray(range.start, range.end + 1);
+      res.writeHead(206, { ...headers, 'Content-Length': slice.length, 'Content-Range': `bytes ${range.start}-${range.end}/${buf.length}` });
+      res.end(slice); return;
+    }
+    res.writeHead(200, { ...headers, 'Content-Length': buf.length });
     res.end(buf);
     return;
   }
@@ -512,6 +567,32 @@ export async function handler(req, res) {
   // ── Put object ──────────────────────────────────────────────────────────
   if (method === 'PUT' && objectKey) {
     if (!bucket) return s3Error(res, 404, 'NoSuchBucket', `No such bucket`);
+
+    // CopyObject — PUT with x-amz-copy-source: /srcBucket/srcKey[?versionId=…].
+    const copySource = req.headers['x-amz-copy-source'];
+    if (copySource) {
+      const decoded = decodeURIComponent(copySource.replace(/^\//, '')).split('?')[0];
+      const slash = decoded.indexOf('/');
+      const srcBucket = decoded.slice(0, slash), srcKey = decoded.slice(slash + 1);
+      const src = store.s3.buckets[srcBucket]?.objects[srcKey];
+      if (!src || src.isDeleteMarker) return s3Error(res, 404, 'NoSuchKey', 'The specified copy source does not exist.');
+      let body;
+      try { body = readObjectFromDisk(srcBucket, srcKey); } catch { return s3Error(res, 500, 'InternalError', 'Failed to read copy source'); }
+      const cetag = crypto.createHash('md5').update(body).digest('hex');
+      const cVersioned = bucket.versioning === 'Enabled';
+      const cVersionId = cVersioned ? newVersionId() : null;
+      try { writeObjectToDisk(bucketName, objectKey, body); if (cVersioned) writeVersionToDisk(bucketName, objectKey, cVersionId, body); }
+      catch (e) { return s3Error(res, 500, 'InternalError', `Failed to persist copy: ${e.message}`); }
+      const replace = (req.headers['x-amz-metadata-directive'] || 'COPY').toUpperCase() === 'REPLACE';
+      const cmeta = { key: objectKey, size: body.length, contentType: req.headers['content-type'] || src.contentType,
+        etag: cetag, modified: Date.now(), metadata: replace ? extractMetadata(req.headers) : (src.metadata || {}), versionId: cVersionId, isDeleteMarker: false };
+      bucket.objects[objectKey] = cmeta;
+      if (cVersioned) { if (!bucket.objectVersions) bucket.objectVersions = {}; bucket.objectVersions[objectKey] = [cmeta, ...(bucket.objectVersions[objectKey] || [])]; }
+      emitS3Event(bucketName, objectKey, 's3:ObjectCreated:Copy', cmeta);
+      if (cVersioned) res.setHeader('x-amz-version-id', cVersionId);
+      return xmlResponse(res, 200, `<?xml version="1.0"?><CopyObjectResult><ETag>&quot;${cetag}&quot;</ETag><LastModified>${new Date(cmeta.modified).toISOString()}</LastModified></CopyObjectResult>`);
+    }
+
     const buf       = getRawBuffer(req);
     const etag      = crypto.createHash('md5').update(buf).digest('hex');
     const versioned = bucket.versioning === 'Enabled';
@@ -742,6 +823,45 @@ function extractMetadata(headers) {
     if (k.startsWith('x-amz-meta-')) meta[k.slice(11)] = v;
   }
   return meta;
+}
+
+// Conditional-request evaluation → 412 (precondition failed) | 304 (not modified) | null.
+function checkConditional(req, obj) {
+  const im = req.headers['if-match'], inm = req.headers['if-none-match'];
+  const ius = req.headers['if-unmodified-since'], ims = req.headers['if-modified-since'];
+  const matches = h => h.split(',').map(s => s.trim()).some(t => t === '*' || t.replace(/^W\//, '').replace(/^"|"$/g, '') === obj.etag);
+  if (im && !matches(im)) return 412;
+  if (ius && new Date(obj.modified) > new Date(ius)) return 412;
+  if (inm && matches(inm)) return 304;
+  if (ims && new Date(obj.modified) <= new Date(ims)) return 304;
+  return null;
+}
+
+// Parse a Range header → { start, end } | 'invalid' | null.
+function parseRange(header, total) {
+  if (!header) return null;
+  const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!m || (m[1] === '' && m[2] === '')) return null;
+  let start = m[1] === '' ? null : parseInt(m[1], 10);
+  let end   = m[2] === '' ? null : parseInt(m[2], 10);
+  if (start === null) { start = Math.max(0, total - end); end = total - 1; }   // suffix range
+  else if (end === null || end >= total) end = total - 1;
+  if (start > end || start >= total) return 'invalid';
+  return { start, end };
+}
+
+// Virtual-hosted-style addressing: <bucket>.s3[.-]<region>.amazonaws.com (or the
+// LocalStack *.localhost.localstack.cloud variants) → bucket from the Host header.
+// Path-style hosts (s3.amazonaws.com, 127.0.0.1, localhost) return null.
+function parseS3Host(host) {
+  if (!host) return null;
+  const h = host.split(':')[0].toLowerCase();
+  const m = /^(.+?)\.s3(?:[.-][a-z0-9-]+)?\.(?:amazonaws\.com|localhost\.localstack\.cloud)$/.exec(h);
+  return m ? m[1] : null;
+}
+
+function xmlUnescape(s) {
+  return String(s).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
 }
 
 // Parse an X-Amz-Date stamp (YYYYMMDDTHHMMSSZ, always UTC) to epoch ms.
