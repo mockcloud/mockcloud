@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import { Router } from './router.js';
 import { dispatchAWS } from './dispatcher.js';
 import { registerAllRoutes } from './routes/index.js';
+import { sendInternalError } from './middleware/response.js';
 import { VERSION } from './version.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -50,9 +51,15 @@ const awsServer = http.createServer(async (req, res) => {
   req.rawBody = req.rawBuffer.toString();
   req.parsedBody = (() => { try { return JSON.parse(req.rawBody); } catch { return {}; } })();
 
-  // Try internal UI routes first, then AWS dispatch
-  const matched = await apiRouter.dispatch(req, res);
-  if (!matched) await dispatchAWS(req, res);
+  // Try internal UI routes first, then AWS dispatch. A top-level boundary turns
+  // any unhandled handler error into a proper AWS error shape instead of a hung
+  // socket (which breaks SDK retry/timeout behaviour).
+  try {
+    const matched = await apiRouter.dispatch(req, res);
+    if (!matched) await dispatchAWS(req, res);
+  } catch (err) {
+    sendInternalError(req, res, err);
+  }
 });
 
 // ── UI server (port 4567) ──────────────────────────────────────────────────

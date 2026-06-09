@@ -11,6 +11,7 @@ import { store } from '../../src/store.js';
 import { Router } from '../../src/router.js';
 import { dispatchAWS } from '../../src/dispatcher.js';
 import { registerAllRoutes } from '../../src/routes/index.js';
+import { sendInternalError } from '../../src/middleware/response.js';
 
 function readBody(req) {
   return new Promise(resolve => {
@@ -40,8 +41,12 @@ export async function startServer() {
     req.rawBody = req.rawBuffer.toString();
     req.parsedBody = (() => { try { return JSON.parse(req.rawBody); } catch { return {}; } })();
 
-    const matched = await apiRouter.dispatch(req, res);
-    if (!matched) await dispatchAWS(req, res);
+    try {
+      const matched = await apiRouter.dispatch(req, res);
+      if (!matched) await dispatchAWS(req, res);
+    } catch (err) {
+      sendInternalError(req, res, err);
+    }
   });
 
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));

@@ -95,6 +95,20 @@ describe('Object operations', () => {
     assert.ok(keys.includes('a.txt'));
     assert.ok(keys.includes('b.txt'));
   });
+
+  it('paginates ListObjectsV2 with ContinuationToken', async () => {
+    const bucket = freshBucket();
+    await s3.send(new CreateBucketCommand({ Bucket: bucket }));
+    for (const k of ['a', 'b', 'c']) await s3.send(new PutObjectCommand({ Bucket: bucket, Key: k, Body: Buffer.from(k) }));
+    const p1 = await s3.send(new ListObjectsV2Command({ Bucket: bucket, MaxKeys: 2 }));
+    assert.equal(p1.KeyCount, 2);
+    assert.equal(p1.IsTruncated, true);
+    assert.ok(p1.NextContinuationToken);
+    assert.deepEqual(p1.Contents.map(o => o.Key), ['a', 'b']);
+    const p2 = await s3.send(new ListObjectsV2Command({ Bucket: bucket, MaxKeys: 2, ContinuationToken: p1.NextContinuationToken }));
+    assert.equal(p2.IsTruncated, false);
+    assert.deepEqual(p2.Contents.map(o => o.Key), ['c']);
+  });
 });
 
 // ── Website configuration ────────────────────────────────────────────────────
@@ -295,6 +309,16 @@ describe('Presigned URLs', () => {
     // Rewind the signing time well past the 60s window — MockCloud ignores the
     // (now-invalid) signature but enforces X-Amz-Date + X-Amz-Expires.
     u.searchParams.set('X-Amz-Date', '20200101T000000Z');
+    const res = await fetch(u);
+    assert.equal(res.status, 403);
+  });
+
+  it('rejects a presigned URL missing the signature', async () => {
+    const bucket = freshBucket();
+    await s3.send(new CreateBucketCommand({ Bucket: bucket }));
+    await s3.send(new PutObjectCommand({ Bucket: bucket, Key: 'k.txt', Body: Buffer.from('x') }));
+    const u = new URL(await getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: 'k.txt' }), { expiresIn: 60 }));
+    u.searchParams.delete('X-Amz-Signature');
     const res = await fetch(u);
     assert.equal(res.status, 403);
   });

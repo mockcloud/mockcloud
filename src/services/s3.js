@@ -40,11 +40,17 @@ export async function handler(req, res) {
   // doesn't verify the signature — it trusts local callers — but it DOES honor
   // the X-Amz-Expires window so presigned-URL expiry can be tested.
   if (url.searchParams.has('X-Amz-Algorithm')) {
+    // Presigned request. MockCloud is credential-less (it accepts any access
+    // key), so there is no secret to verify the SigV4 signature against — it
+    // can't be cryptographically validated the way real S3 does. We DO enforce
+    // structural integrity (all SigV4 query params present) and expiry.
+    for (const p of ['X-Amz-Credential', 'X-Amz-Date', 'X-Amz-Expires', 'X-Amz-SignedHeaders', 'X-Amz-Signature']) {
+      if (!url.searchParams.get(p)) return s3Error(res, 403, 'AccessDenied', `Invalid presigned request: missing ${p}`);
+    }
     const signedMs = parseAmzDate(url.searchParams.get('X-Amz-Date'));
     const expires  = parseInt(url.searchParams.get('X-Amz-Expires') || '0', 10);
-    if (signedMs && expires > 0 && Date.now() > signedMs + expires * 1000) {
-      return s3Error(res, 403, 'AccessDenied', 'Request has expired');
-    }
+    if (!signedMs || expires <= 0) return s3Error(res, 403, 'AccessDenied', 'Invalid presigned request: bad X-Amz-Date or X-Amz-Expires');
+    if (Date.now() > signedMs + expires * 1000) return s3Error(res, 403, 'AccessDenied', 'Request has expired');
   }
 
   // ── List all buckets ────────────────────────────────────────────────────
@@ -314,22 +320,45 @@ export async function handler(req, res) {
     res.end(); return;
   }
 
-  // ── List objects ────────────────────────────────────────────────────────
+  // ── List objects (V1 + V2, paginated) ─────────────────────────────────────
   if (method === 'GET' && !objectKey) {
     const bucket = store.s3.buckets[bucketName];
     if (!bucket) return s3Error(res, 404, 'NoSuchBucket', `Bucket ${bucketName} does not exist`);
-    const prefix    = url.searchParams.get('prefix') || '';
-    const maxKeys   = parseInt(url.searchParams.get('max-keys') || '1000');
-    const listType  = url.searchParams.get('list-type'); // '2' for ListObjectsV2
-    const objects   = Object.values(bucket.objects)
+    const prefix  = url.searchParams.get('prefix') || '';
+    const maxKeys = Math.max(0, parseInt(url.searchParams.get('max-keys') || '1000', 10) || 0);
+    const isV2    = url.searchParams.get('list-type') === '2';
+    const token   = isV2 ? url.searchParams.get('continuation-token') : url.searchParams.get('marker');
+    // Resume point: a continuation token (we encode the last returned key as
+    // base64), or start-after (V2) / marker (V1) on a fresh request.
+    const after = token
+      ? Buffer.from(token, 'base64').toString('utf8')
+      : (isV2 ? (url.searchParams.get('start-after') || '') : '');
+
+    // S3 returns keys in lexicographic order — sort so pagination is stable.
+    let keys = Object.values(bucket.objects)
       .filter(o => o.key.startsWith(prefix) && !o.isDeleteMarker)
-      .slice(0, maxKeys);
-    const contents = objects.map(o =>
+      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    if (after) keys = keys.filter(o => o.key > after);
+
+    const page        = keys.slice(0, maxKeys);
+    const isTruncated = keys.length > maxKeys;
+    const nextToken   = isTruncated && page.length
+      ? Buffer.from(page[page.length - 1].key, 'utf8').toString('base64')
+      : null;
+
+    const contents = page.map(o =>
       `<Contents><Key>${escapeXml(o.key)}</Key><Size>${o.size}</Size><LastModified>${new Date(o.modified).toISOString()}</LastModified><ETag>&quot;${o.etag}&quot;</ETag><StorageClass>STANDARD</StorageClass></Contents>`
     ).join('');
-    const keyCount = listType === '2' ? `<KeyCount>${objects.length}</KeyCount>` : '';
+
+    const pageMeta = isV2
+      ? `<KeyCount>${page.length}</KeyCount>` +
+        (token ? `<ContinuationToken>${escapeXml(token)}</ContinuationToken>` : '') +
+        (nextToken ? `<NextContinuationToken>${nextToken}</NextContinuationToken>` : '')
+      : (after ? `<Marker>${escapeXml(after)}</Marker>` : '<Marker></Marker>') +
+        (isTruncated && page.length ? `<NextMarker>${escapeXml(page[page.length - 1].key)}</NextMarker>` : '');
+
     return xmlResponse(res, 200,
-      `<?xml version="1.0"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>${escapeXml(bucketName)}</Name><Prefix>${escapeXml(prefix)}</Prefix><MaxKeys>${maxKeys}</MaxKeys>${keyCount}<IsTruncated>false</IsTruncated>${contents}</ListBucketResult>`);
+      `<?xml version="1.0"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>${escapeXml(bucketName)}</Name><Prefix>${escapeXml(prefix)}</Prefix><MaxKeys>${maxKeys}</MaxKeys>${pageMeta}<IsTruncated>${isTruncated}</IsTruncated>${contents}</ListBucketResult>`);
   }
 
   const bucket = store.s3.buckets[bucketName];
