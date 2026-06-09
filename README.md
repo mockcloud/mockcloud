@@ -18,41 +18,52 @@ Console  →  http://127.0.0.1:4567
 
 ---
 
-## Why MockCloud?
+## Why MockCloud exists
 
-- **No AWS account needed** — dev and test completely offline
-- **No Docker required** — works out of the box (Docker optional for EC2 VMM mode)
+[LocalStack](https://localstack.cloud) used to be the easy answer for "run AWS locally."
+Then the features most teams actually reach for — S3 notifications, DynamoDB streams,
+Lambda triggers, the cross-service wiring that makes integration tests worth writing —
+drifted behind the paid **Pro** tier. The free Community edition kept shrinking.
+
+MockCloud is the unapologetically free alternative: **12 of the most-used AWS services**,
+the cross-service plumbing that actually fires, and a visual console — all under the MIT
+license. No account, no auth token, no usage limits, no telemetry, no "upgrade to unlock."
+
+It's a single Node.js process with **zero runtime dependencies** (the AWS SDKs are dev-only,
+for the test suite). Clone it, read it, hack on it.
+
+- **No AWS account needed** — develop and test completely offline
+- **No Docker required** — pure Node.js, works out of the box
 - **Visual console included** — browser UI to inspect every service
-- **Cross-service wiring is real** — SNS → Lambda, EventBridge → SQS, DDB Streams → Lambda all actually fire
-- **Free forever** — MIT license, no telemetry, no SaaS
+- **Cross-service wiring is real** — S3 → SQS/SNS/Lambda, SNS → Lambda, EventBridge → SQS, DynamoDB Streams → Lambda all actually fire
+- **SDK-tested** — the suite drives MockCloud with the real `@aws-sdk/*` clients (presigned URLs even exercise live SigV4)
 
 ---
 
-## Supported Services
+## Supported services
 
-| Service | What works |
-|---|---|
-| **S3** | Buckets, objects, disk persistence, binary integrity, real ETags |
-| **DynamoDB** | Tables, items, GSI, queries, scans, batch ops, transactions |
-| **DynamoDB Streams** | INSERT/MODIFY/REMOVE events, Lambda triggers via event source mappings |
-| **Lambda** | Create/invoke/delete, zip upload, real Node.js sandbox execution |
-| **SQS** | Queues, send/receive/delete/purge, visibility timeout, real MD5 |
-| **SNS** | Topics, subscriptions, fan-out to Lambda + SQS subscribers |
-| **EventBridge** | Rules, targets, real fan-out to Lambda/SQS/SNS |
-| **EC2** | RunInstances, stop/start/terminate (simulated or real Docker containers) |
-| **IAM / STS** | Users, roles, policies, AssumeRole, GetCallerIdentity |
-| **Secrets Manager** | Create/get/update/delete secrets |
-| **SSM Parameter Store** | Put/get/delete parameters |
-| **KMS** | Keys, encrypt/decrypt |
-| **CloudWatch** | PutMetricData, GetMetricStatistics, ring-buffer storage |
-| **SES** | Send emails, inbox viewer in console |
-| **Step Functions** | State machines, executions, ASL interpreter |
-| **Cognito** | User pools, users, auth flows |
-| **API Gateway** | REST APIs, resources, methods, integrations |
+12 services, focused on depth over breadth.
+
+| Service | Status | What works |
+|---|:---:|---|
+| **S3** | ✅ | Buckets & objects (disk-persisted, real ETags), **presigned URLs** (GET/PUT + expiry), **versioning** (version IDs, delete markers, `ListObjectVersions`), **bucket notifications** → SQS/SNS/Lambda, **CORS** (preflight + enforcement), website, ACL, tagging, policy, public-access-block |
+| **DynamoDB** | ✅ | Tables, items, Query/Scan, **GSI & LSI** (KEYS_ONLY/INCLUDE/ALL projections), condition / update / filter / projection **expressions**, BatchWrite/Get, **TransactWriteItems / TransactGetItems** (atomic, ordered cancellation reasons) |
+| **DynamoDB Streams** | ✅ | INSERT / MODIFY / REMOVE records, Lambda triggers via event-source mappings |
+| **Lambda** | ✅ | Create / invoke / delete, zip upload, **real Node.js sandbox execution**, environment variables, timeout enforcement, layers, Get/Update function configuration |
+| **SQS** | ✅ | Standard **and FIFO** queues (message groups, content/id dedup, sequence numbers, ordered delivery), send/receive/delete/purge, visibility timeout, real MD5 |
+| **SNS** | ✅ | Topics, subscriptions, fan-out to SQS + Lambda subscribers |
+| **EventBridge** | ✅ | Rules, targets, real fan-out to Lambda / SQS / SNS |
+| **IAM** | ✅ | Users, roles, policies, access keys |
+| **STS** | ✅ | AssumeRole, GetCallerIdentity, GetSessionToken |
+| **Secrets Manager** | ✅ | Create / get / update / delete secrets |
+| **EC2** | 🟡 | Simulated instances (run/stop/start/terminate), security groups, key pairs, VPC/subnet/AZ describes |
+| **CloudWatch** | 🟡 | PutMetricData, GetMetricStatistics, live activity metrics (ring-buffer storage) |
+
+✅ broad coverage · 🟡 core operations
 
 ---
 
-## Quick Start
+## Quick start
 
 ### npm (recommended)
 
@@ -60,17 +71,12 @@ Console  →  http://127.0.0.1:4567
 npm install -g mockcloud   # coming soon
 mockcloud
 ```
+
 ### Docker
 
 ```bash
-# Simulated mode (default, no Docker needed)
 docker pull ghcr.io/mockcloud/mockcloud:latest
 docker run -p 4566:4566 -p 4567:4567 ghcr.io/mockcloud/mockcloud
-
-# Docker VMM mode (real containers — mounts host Docker socket)
-docker run -p 4566:4566 -p 4567:4567 \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  ghcr.io/mockcloud/mockcloud --ec2=docker
 ```
 
 ### From source
@@ -85,7 +91,7 @@ npm start            # start on :4566 (API) + :4567 (console)
 
 ---
 
-## Connect Your SDK
+## Connect your SDK
 
 ### AWS CLI
 
@@ -140,39 +146,46 @@ provider "aws" {
 
 ---
 
-## CLI Flags
-
-```bash
-node src/index.js --ec2=simulated   # EC2 simulated (default, no Docker needed)
-node src/index.js --ec2=docker      # EC2 backed by real Docker containers
-```
-
-**EC2 auto-detect:** if no flag is passed and Docker is running, MockCloud uses Docker automatically. Otherwise falls back to simulated.
-
-When running in Docker, VMM mode requires mounting the host socket:
--v /var/run/docker.sock:/var/run/docker.sock
-
----
-
-## Environment Variables
+## Environment variables
 
 | Variable | Default | Description |
 |---|---|---|
 | `PORT` | `4566` | AWS API port |
 | `UI_PORT` | `4567` | Console UI port |
 | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for Docker) |
+| `MOCKCLOUD_S3_ROOT` | `~/.mockcloud/s3` | Where S3 object bytes are persisted |
+| `MOCKCLOUD_DYNAMODB_ROOT` | `~/.mockcloud/dynamodb` | Where DynamoDB tables are persisted |
 
 ---
 
 ## Console UI
 
-Open `http://127.0.0.1:4567` in your browser for a visual dashboard of every service — create/delete resources, inspect state, invoke Lambdas, peek SQS queues, view SES inbox, run Step Functions, and more.
+Open `http://127.0.0.1:4567` in your browser for a visual dashboard of every service —
+create/delete resources, inspect state, invoke Lambdas, peek SQS queues, browse DynamoDB
+items, and watch live metrics.
 
 ---
 
 ## Storage
 
-S3 objects persist to disk at `~/.mockcloud/s3/<bucket>/<key>` and survive restarts. Everything else is in-memory and resets on restart. EC2 in Docker mode reconciles container state across restarts via container labels.
+S3 object bytes and DynamoDB tables persist to disk (under `~/.mockcloud/`) and survive
+restarts; object versions live in a `.mockcloud-versions` sidecar alongside each bucket.
+Everything else is in-memory and resets on restart.
+
+---
+
+## Testing
+
+The test suite is **SDK-driven**: it boots the AWS dispatch layer on an ephemeral port and
+drives it with the real `@aws-sdk/*` clients (S3, DynamoDB, SQS, SNS, Lambda, EC2) plus the
+S3 request presigner — so the tests exercise the exact wire format AWS SDKs send.
+
+```bash
+npm test          # vitest run
+npm run test:watch
+```
+
+CI runs the full suite on every pull request (Node 18 & 20).
 
 ---
 
@@ -180,13 +193,14 @@ S3 objects persist to disk at `~/.mockcloud/s3/<bucket>/<key>` and survive resta
 
 ```
 src/
-├── index.js          — HTTP servers, body draining, EC2 mode detection
+├── index.js          — HTTP servers, body draining, CORS
 ├── dispatcher.js     — Routes AWS API calls to service handlers
 ├── router.js         — /mockcloud/* UI API router
 ├── store.js          — In-memory state, CloudWatch ring buffer
 ├── middleware/       — Response helpers (XML, JSON, body)
 ├── routes/           — UI API handlers (one per service)
 └── services/         — AWS API handlers (one per service)
+    └── dynamodb/     — expression engine, update engine, persistence
 ui/
 ├── vite.config.js    — Proxies /mockcloud → :4566
 └── src/
@@ -199,7 +213,9 @@ ui/
 
 ## Contributing
 
-PRs welcome. Services are isolated — adding a new one means dropping a file in `src/services/` and `src/routes/` and registering it in `routes/index.js`.
+PRs welcome. Services are isolated — adding one means dropping a file in `src/services/`
+and `src/routes/` and registering it in `routes/index.js`. New behaviour should come with
+an SDK-driven test in `tests/`.
 
 ```bash
 git clone https://github.com/mockcloud/mockcloud
