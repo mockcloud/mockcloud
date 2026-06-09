@@ -12,6 +12,7 @@ import { Router } from '../../src/router.js';
 import { dispatchAWS } from '../../src/dispatcher.js';
 import { registerAllRoutes } from '../../src/routes/index.js';
 import { sendInternalError } from '../../src/middleware/response.js';
+import { startBackground, stopBackground } from '../../src/lifecycle.js';
 
 function readBody(req) {
   return new Promise(resolve => {
@@ -50,6 +51,7 @@ export async function startServer() {
   });
 
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  startBackground();
   const port = server.address().port;
   const endpoint = `http://127.0.0.1:${port}`;
 
@@ -64,6 +66,6 @@ export async function startServer() {
       mkdirSync(TEST_S3_ROOT, { recursive: true });
       mkdirSync(TEST_DDB_ROOT, { recursive: true });
     },
-    close() { return new Promise(resolve => server.close(resolve)); },
+    close() { stopBackground(); return new Promise(resolve => server.close(resolve)); },
   };
 }

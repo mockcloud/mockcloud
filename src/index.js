@@ -8,6 +8,7 @@ import { Router } from './router.js';
 import { dispatchAWS } from './dispatcher.js';
 import { registerAllRoutes } from './routes/index.js';
 import { sendInternalError } from './middleware/response.js';
+import { startBackground, stopBackground } from './lifecycle.js';
 import { VERSION } from './version.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -105,5 +106,8 @@ awsServer.listen(PORT, HOST, () => {
 
 if (UI_ENABLED) uiServer.listen(UI_PORT, HOST);
 
-process.on('SIGTERM', () => { awsServer.close(); if (UI_ENABLED) uiServer.close(); process.exit(0); });
-process.on('SIGINT',  () => { awsServer.close(); if (UI_ENABLED) uiServer.close(); process.exit(0); });
+// Background pollers / schedulers (SQS→Lambda, EventBridge schedules, …).
+startBackground();
+
+process.on('SIGTERM', () => { stopBackground(); awsServer.close(); if (UI_ENABLED) uiServer.close(); process.exit(0); });
+process.on('SIGINT',  () => { stopBackground(); awsServer.close(); if (UI_ENABLED) uiServer.close(); process.exit(0); });

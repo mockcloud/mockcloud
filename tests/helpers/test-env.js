@@ -15,3 +15,6 @@ export const TEST_DDB_ROOT = path.join(os.tmpdir(), `mockcloud-ddb-test-${WORKER
 
 process.env.MOCKCLOUD_S3_ROOT       = TEST_S3_ROOT;
 process.env.MOCKCLOUD_DYNAMODB_ROOT = TEST_DDB_ROOT;
+
+// Fast background-poll cadence so eventing tests don't wait a full second.
+process.env.MOCKCLOUD_POLL_INTERVAL_MS ??= '50';
