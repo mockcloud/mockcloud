@@ -106,7 +106,8 @@ export async function handler(req, res) {
     url.searchParams.has('publicAccessBlock') || url.searchParams.has('versioning') ||
     url.searchParams.has('policy') || url.searchParams.has('cors') ||
     url.searchParams.has('tagging') || url.searchParams.has('logging') ||
-    url.searchParams.has('versions') || url.searchParams.has('notification');
+    url.searchParams.has('versions') || url.searchParams.has('notification') ||
+    url.searchParams.has('uploads');
   if (method === 'PUT' && !objectKey && !hasSubResource) {
     if (store.s3.buckets[bucketName]) {
       return s3Error(res, 409, 'BucketAlreadyOwnedByYou', `Bucket ${bucketName} already exists`);
@@ -118,6 +119,7 @@ export async function handler(req, res) {
       created: Date.now(),
       objects: {},
       objectVersions: {},
+      multipartUploads: {},
       website: null,
       acl: 'private',
       publicAccessBlock: { blockPublicAcls: true, ignorePublicAcls: true, blockPublicPolicy: true, restrictPublicBuckets: true },
@@ -320,6 +322,16 @@ export async function handler(req, res) {
     res.end(); return;
   }
 
+  // ── List multipart uploads (bucket-level GET /?uploads) ───────────────────
+  if (method === 'GET' && !objectKey && url.searchParams.has('uploads')) {
+    const bkt = store.s3.buckets[bucketName];
+    if (!bkt) return s3Error(res, 404, 'NoSuchBucket', `Bucket ${bucketName} does not exist`);
+    const uploads = Object.values(bkt.multipartUploads || {}).map(u =>
+      `<Upload><Key>${escapeXml(u.key)}</Key><UploadId>${u.uploadId}</UploadId><StorageClass>STANDARD</StorageClass><Initiated>${new Date(u.initiated).toISOString()}</Initiated></Upload>`).join('');
+    return xmlResponse(res, 200,
+      `<?xml version="1.0"?><ListMultipartUploadsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>${escapeXml(bucketName)}</Bucket><KeyMarker/><UploadIdMarker/><MaxUploads>1000</MaxUploads><IsTruncated>false</IsTruncated>${uploads}</ListMultipartUploadsResult>`);
+  }
+
   // ── List objects (V1 + V2, paginated) ─────────────────────────────────────
   if (method === 'GET' && !objectKey) {
     const bucket = store.s3.buckets[bucketName];
@@ -362,6 +374,76 @@ export async function handler(req, res) {
   }
 
   const bucket = store.s3.buckets[bucketName];
+
+  // ── Multipart upload (object-level: ?uploads / ?uploadId) ─────────────────
+  if (objectKey && (url.searchParams.has('uploads') || url.searchParams.has('uploadId'))) {
+    if (!bucket) return s3Error(res, 404, 'NoSuchBucket', `No such bucket`);
+    if (!bucket.multipartUploads) bucket.multipartUploads = {};
+
+    if (method === 'POST' && url.searchParams.has('uploads')) {            // CreateMultipartUpload
+      const uploadId = newVersionId();
+      bucket.multipartUploads[uploadId] = {
+        uploadId, key: objectKey,
+        contentType: req.headers['content-type'] || 'application/octet-stream',
+        metadata: extractMetadata(req.headers), initiated: Date.now(), parts: {},
+      };
+      return xmlResponse(res, 200, `<?xml version="1.0"?><InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>${escapeXml(bucketName)}</Bucket><Key>${escapeXml(objectKey)}</Key><UploadId>${uploadId}</UploadId></InitiateMultipartUploadResult>`);
+    }
+
+    const uploadId = url.searchParams.get('uploadId');
+    const mpu = bucket.multipartUploads[uploadId];
+    if (!mpu) return s3Error(res, 404, 'NoSuchUpload', 'The specified multipart upload does not exist.');
+
+    if (method === 'PUT' && url.searchParams.has('partNumber')) {          // UploadPart (binary-safe)
+      const partNumber = parseInt(url.searchParams.get('partNumber'), 10);
+      const buf = getRawBuffer(req);
+      const etag = crypto.createHash('md5').update(buf).digest('hex');
+      try { writeMpuPartToDisk(bucketName, uploadId, partNumber, buf); }
+      catch (e) { return s3Error(res, 500, 'InternalError', `Failed to persist part: ${e.message}`); }
+      mpu.parts[partNumber] = { partNumber, etag, size: buf.length };
+      res.writeHead(200, { 'ETag': `"${etag}"` }); res.end(); return;
+    }
+
+    if (method === 'GET') {                                                // ListParts
+      const parts = Object.values(mpu.parts).sort((a, b) => a.partNumber - b.partNumber).map(p =>
+        `<Part><PartNumber>${p.partNumber}</PartNumber><ETag>&quot;${p.etag}&quot;</ETag><Size>${p.size}</Size></Part>`).join('');
+      return xmlResponse(res, 200, `<?xml version="1.0"?><ListPartsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>${escapeXml(bucketName)}</Bucket><Key>${escapeXml(objectKey)}</Key><UploadId>${uploadId}</UploadId>${parts}</ListPartsResult>`);
+    }
+
+    if (method === 'DELETE') {                                             // AbortMultipartUpload
+      delete bucket.multipartUploads[uploadId];
+      try { rmSync(mpuDir(bucketName, uploadId), { recursive: true, force: true }); } catch {}
+      res.writeHead(204); res.end(); return;
+    }
+
+    if (method === 'POST') {                                               // CompleteMultipartUpload
+      const requested = [...getRawBuffer(req).toString().matchAll(/<PartNumber>(\d+)<\/PartNumber>/g)].map(m => parseInt(m[1], 10));
+      const order = requested.length ? requested : Object.keys(mpu.parts).map(Number).sort((a, b) => a - b);
+      const buffers = [];
+      for (const pn of order) {
+        if (!mpu.parts[pn]) return s3Error(res, 400, 'InvalidPart', `Part ${pn} not found`);
+        try { buffers.push(readMpuPartFromDisk(bucketName, uploadId, pn)); }
+        catch { return s3Error(res, 400, 'InvalidPart', `Part ${pn} data missing`); }
+      }
+      const full = Buffer.concat(buffers);
+      // S3 multipart ETag = md5(concatenated binary part-MD5s) + "-<partCount>".
+      const etag = `${crypto.createHash('md5').update(Buffer.concat(order.map(pn => Buffer.from(mpu.parts[pn].etag, 'hex')))).digest('hex')}-${order.length}`;
+      const versioned = bucket.versioning === 'Enabled';
+      const versionId = versioned ? newVersionId() : null;
+      try {
+        writeObjectToDisk(bucketName, objectKey, full);
+        if (versioned) writeVersionToDisk(bucketName, objectKey, versionId, full);
+      } catch (e) { return s3Error(res, 500, 'InternalError', `Failed to assemble object: ${e.message}`); }
+      const meta = { key: objectKey, size: full.length, contentType: mpu.contentType, etag, modified: Date.now(), metadata: mpu.metadata || {}, versionId, isDeleteMarker: false };
+      bucket.objects[objectKey] = meta;
+      if (versioned) { if (!bucket.objectVersions) bucket.objectVersions = {}; bucket.objectVersions[objectKey] = [meta, ...(bucket.objectVersions[objectKey] || [])]; }
+      delete bucket.multipartUploads[uploadId];
+      try { rmSync(mpuDir(bucketName, uploadId), { recursive: true, force: true }); } catch {}
+      emitS3Event(bucketName, objectKey, 's3:ObjectCreated:CompleteMultipartUpload', meta);
+      if (versioned) res.setHeader('x-amz-version-id', versionId);
+      return xmlResponse(res, 200, `<?xml version="1.0"?><CompleteMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Location>http://localhost:4566/${escapeXml(bucketName)}/${escapeXml(objectKey)}</Location><Bucket>${escapeXml(bucketName)}</Bucket><Key>${escapeXml(objectKey)}</Key><ETag>&quot;${etag}&quot;</ETag></CompleteMultipartUploadResult>`);
+    }
+  }
 
   // ── Head object ─────────────────────────────────────────────────────────
   if (method === 'HEAD' && objectKey) {
@@ -585,6 +667,17 @@ function readObjectVersionFromDisk(bucket, key, versionId) {
 
 function newVersionId() { return randomId(32); }
 
+// Multipart upload parts live in a per-upload sidecar dir (skipped by hydration).
+function mpuDir(bucket, uploadId) { return path.join(S3_ROOT, bucket, '.mockcloud-mpu', uploadId); }
+function writeMpuPartToDisk(bucket, uploadId, partNumber, buf) {
+  const dir = mpuDir(bucket, uploadId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, String(partNumber)), buf);
+}
+function readMpuPartFromDisk(bucket, uploadId, partNumber) {
+  return readFileSync(path.join(mpuDir(bucket, uploadId), String(partNumber)));
+}
+
 function hydrateFromDisk() {
   if (!existsSync(S3_ROOT)) return;
   let bucketDirs;
@@ -610,6 +703,7 @@ function walkObjects(dir, prefix, out) {
   try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
   for (const e of entries) {
     if (e.name === '.mockcloud-versions') continue;  // version sidecar, not a key
+    if (e.name === '.mockcloud-mpu') continue;       // multipart-parts sidecar, not a key
     if (e.name.includes('.tmp-')) continue;          // skip stale temp files
     const full = path.join(dir, e.name);
     const key  = prefix ? `${prefix}/${e.name}` : e.name;
