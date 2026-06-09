@@ -25,7 +25,7 @@ Then the features most teams actually reach for — S3 notifications, DynamoDB s
 Lambda triggers, the cross-service wiring that makes integration tests worth writing —
 drifted behind the paid **Pro** tier. The free Community edition kept shrinking.
 
-MockCloud is the unapologetically free alternative: **12 of the most-used AWS services**,
+MockCloud is the unapologetically free alternative: **16 of the most-used AWS services**,
 the cross-service plumbing that actually fires, and a visual console — all under the MIT
 license. No account, no auth token, no usage limits, no telemetry, no "upgrade to unlock."
 
@@ -35,31 +35,54 @@ for the test suite). Clone it, read it, hack on it.
 - **No AWS account needed** — develop and test completely offline
 - **No Docker required** — pure Node.js, works out of the box
 - **Visual console included** — browser UI to inspect every service
-- **Cross-service wiring is real** — S3 → SQS/SNS/Lambda, SNS → Lambda, EventBridge → SQS, DynamoDB Streams → Lambda all actually fire
+- **Cross-service wiring is real** — S3 → SQS/SNS/Lambda, SNS → SQS/Lambda, SQS → Lambda, EventBridge → SQS/SNS/Lambda/Step Functions, DynamoDB Streams → Lambda, and SES inbound → S3/SNS/Lambda all actually fire
 - **SDK-tested** — the suite drives MockCloud with the real `@aws-sdk/*` clients (presigned URLs even exercise live SigV4)
 
 ---
 
 ## Supported services
 
-12 services, focused on depth over breadth.
+16 services, focused on depth over breadth.
 
 | Service | Status | What works |
 |---|:---:|---|
-| **S3** | ✅ | Buckets & objects (disk-persisted, real ETags), **presigned URLs** (GET/PUT + expiry), **versioning** (version IDs, delete markers, `ListObjectVersions`), **bucket notifications** → SQS/SNS/Lambda, **CORS** (preflight + enforcement), website, ACL, tagging, policy, public-access-block |
+| **S3** | ✅ | Buckets & objects (disk-persisted, real ETags), **multipart upload**, **CopyObject**, **Range GET / conditional requests**, **DeleteObjects**, **virtual-host addressing**, **presigned URLs** (GET/PUT + expiry), **versioning** (version IDs, delete markers, `ListObjectVersions`), **bucket notifications** → SQS/SNS/Lambda, **CORS** (preflight + enforcement), website, ACL, tagging, policy, public-access-block |
 | **DynamoDB** | ✅ | Tables, items, Query/Scan, **GSI & LSI** (KEYS_ONLY/INCLUDE/ALL projections), condition / update / filter / projection **expressions**, BatchWrite/Get, **TransactWriteItems / TransactGetItems** (atomic, ordered cancellation reasons) |
 | **DynamoDB Streams** | ✅ | INSERT / MODIFY / REMOVE records, Lambda triggers via event-source mappings |
-| **Lambda** | ✅ | Create / invoke / delete, zip upload, **real Node.js sandbox execution**, environment variables, timeout enforcement, layers, Get/Update function configuration |
-| **SQS** | ✅ | Standard **and FIFO** queues (message groups, content/id dedup, sequence numbers, ordered delivery), send/receive/delete/purge, visibility timeout, real MD5 |
-| **SNS** | ✅ | Topics, subscriptions, fan-out to SQS + Lambda subscribers |
-| **EventBridge** | ✅ | Rules, targets, real fan-out to Lambda / SQS / SNS |
+| **Lambda** | ✅ | Create / invoke / delete, zip upload, **real Node.js sandbox execution**, environment variables, timeout enforcement, layers, Get/Update function configuration, **SQS event-source mappings** (auto-poll + DLQ redrive), logs → CloudWatch Logs |
+| **SQS** | ✅ | Standard **and FIFO** queues (message groups, content/id dedup, sequence numbers, ordered delivery), send/receive/delete/purge, **batch send/delete**, **ChangeMessageVisibility**, **long polling** (`WaitTimeSeconds`), **`DelaySeconds`**, **message attributes** + MD5, **DLQ / `RedrivePolicy`** + `ApproximateReceiveCount` |
+| **SNS** | ✅ | Topics, subscriptions, fan-out to SQS + Lambda, **`FilterPolicy`** (exact / `anything-but` / prefix / numeric / exists; attribute or body scope), **message attributes**, **`RawMessageDelivery`**, **`PublishBatch`**, subscription / topic attributes |
+| **EventBridge** | ✅ | Rules, targets, real fan-out to Lambda / SQS / SNS / **Step Functions**, **scheduled rules** (`rate(...)`, cron approximated) |
+| **Step Functions** | ✅ | State machines, executions (async completion + history), Describe/List, **EventBridge → StartExecution** target |
+| **Bedrock** | ✅ | `InvokeModel` / `Converse` (+ **streaming** via `vnd.amazon.eventstream`), **configurable canned responses + fault injection** via the `/mockcloud/bedrock` control plane, guardrail stub |
+| **SES** | ✅ | SendEmail / SendRawEmail, identities, send quota/stats, **inbound receipt rules** → S3 / SNS / Lambda (control-plane driven) |
 | **IAM** | ✅ | Users, roles, policies, access keys |
 | **STS** | ✅ | AssumeRole, GetCallerIdentity, GetSessionToken |
 | **Secrets Manager** | ✅ | Create / get / update / delete secrets |
+| **CloudWatch** | ✅ | PutMetricData, GetMetricStatistics, ListMetrics, live activity metrics (ring-buffer storage) |
+| **CloudWatch Logs** | ✅ | Log groups / streams, PutLogEvents, FilterLogEvents, Lambda execution logs → `/aws/lambda/<fn>` |
 | **EC2** | 🟡 | Simulated instances (run/stop/start/terminate), security groups, key pairs, VPC/subnet/AZ describes |
-| **CloudWatch** | 🟡 | PutMetricData, GetMetricStatistics, live activity metrics (ring-buffer storage) |
 
 ✅ broad coverage · 🟡 core operations
+
+### Known limitations
+
+MockCloud favors realistic behavior for everyday SDK/Terraform workflows over
+100% API fidelity. Notable gaps:
+
+- **Presigned URL signatures are not cryptographically verified** — the URL
+  structure is validated, but the SigV4 signature isn't recomputed (no IAM
+  enforcement; any well-formed request is accepted).
+- **EventBridge `cron(...)`** schedules are approximated to a ~1-minute cadence;
+  `rate(...)` is exact. Event-pattern matching covers `source` + `detail-type`.
+- **SNS `FilterPolicy`** and **CloudWatch Logs filter patterns** implement a
+  common subset, not the full grammar.
+- **Bedrock** responses are canned/configurable, not real model output;
+  streaming emits well-formed event-stream frames for a representative event set.
+- **SES inbound** can't receive real SMTP — receipt rules are driven via the
+  `/mockcloud/ses/inbound` control-plane endpoint.
+- **MD5 of message attributes** follows the AWS canonical encoding for String /
+  Binary types.
 
 ---
 
@@ -180,8 +203,11 @@ Everything else is in-memory and resets on restart.
 ## Testing
 
 The test suite is **SDK-driven**: it boots the AWS dispatch layer on an ephemeral port and
-drives it with the real `@aws-sdk/*` clients (S3, DynamoDB, SQS, SNS, Lambda, EC2) plus the
-S3 request presigner — so the tests exercise the exact wire format AWS SDKs send.
+drives it with the real `@aws-sdk/*` clients (S3, DynamoDB, SQS, SNS, Lambda, EC2, CloudWatch,
+CloudWatch Logs) plus the S3 request presigner — so the tests exercise the exact wire format
+AWS SDKs send. Services whose SDK clients aren't dev-deps (EventBridge, Step Functions, SES,
+Bedrock) are driven at the wire level via small `tests/helpers/http.js` helpers that
+reproduce the same request shapes.
 
 ```bash
 npm test          # vitest run
