@@ -23,6 +23,8 @@ import {
   DeleteObjectCommand,
   ListObjectsV2Command,
   ListObjectVersionsCommand,
+  PutBucketCorsCommand,
+  GetBucketCorsCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { startServer } from './helpers/server.js';
@@ -373,5 +375,53 @@ describe('Object versioning', () => {
     assert.equal(await readBody(await s3.send(new GetObjectCommand({ Bucket: bucket, Key: 'k' }))), 'two');
     const list = await s3.send(new ListObjectVersionsCommand({ Bucket: bucket }));
     assert.equal(list.Versions.length, 1);
+  });
+});
+
+// ── CORS ───────────────────────────────────────────────────────────────────────
+
+describe('Bucket CORS', () => {
+  const corsConfig = {
+    CORSRules: [{
+      AllowedOrigins: ['https://app.example.com'],
+      AllowedMethods: ['GET', 'PUT'],
+      AllowedHeaders: ['*'],
+      ExposeHeaders:  ['ETag'],
+      MaxAgeSeconds:  3000,
+    }],
+  };
+
+  it('PutBucketCors and GetBucketCors round-trip', async () => {
+    const bucket = freshBucket();
+    await s3.send(new CreateBucketCommand({ Bucket: bucket }));
+    await s3.send(new PutBucketCorsCommand({ Bucket: bucket, CORSConfiguration: corsConfig }));
+    const got = await s3.send(new GetBucketCorsCommand({ Bucket: bucket }));
+    assert.equal(got.CORSRules.length, 1);
+    assert.deepEqual(got.CORSRules[0].AllowedOrigins, ['https://app.example.com']);
+    assert.deepEqual([...got.CORSRules[0].AllowedMethods].sort(), ['GET', 'PUT']);
+  });
+
+  it('allows a preflight from a permitted origin', async () => {
+    const bucket = freshBucket();
+    await s3.send(new CreateBucketCommand({ Bucket: bucket }));
+    await s3.send(new PutBucketCorsCommand({ Bucket: bucket, CORSConfiguration: corsConfig }));
+    const res = await fetch(`${server.endpoint}/${bucket}`, {
+      method: 'OPTIONS',
+      headers: { Origin: 'https://app.example.com', 'Access-Control-Request-Method': 'GET' },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('access-control-allow-origin'), 'https://app.example.com');
+    assert.ok(res.headers.get('access-control-allow-methods').includes('GET'));
+  });
+
+  it('rejects a preflight from a disallowed origin with 403', async () => {
+    const bucket = freshBucket();
+    await s3.send(new CreateBucketCommand({ Bucket: bucket }));
+    await s3.send(new PutBucketCorsCommand({ Bucket: bucket, CORSConfiguration: corsConfig }));
+    const res = await fetch(`${server.endpoint}/${bucket}`, {
+      method: 'OPTIONS',
+      headers: { Origin: 'https://evil.example.com', 'Access-Control-Request-Method': 'GET' },
+    });
+    assert.equal(res.status, 403);
   });
 });

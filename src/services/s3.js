@@ -63,6 +63,37 @@ export async function handler(req, res) {
     return xmlResponse(res, 200, '<?xml version="1.0"?><ListAllMyBucketsResult><Buckets></Buckets></ListAllMyBucketsResult>');
   }
 
+  // ── CORS ──────────────────────────────────────────────────────────────────
+  // Reflect a matching allowed-origin onto every response, and answer OPTIONS
+  // preflight against the bucket's CORS rules (403 when the origin/method isn't
+  // allowed). Buckets with no CORS config fall back to a permissive preflight,
+  // preserving the dev-friendly default for the UI and SDK callers.
+  const origin = req.headers['origin'];
+  if (origin) {
+    const rule = matchCorsRule(store.s3.buckets[bucketName]?.corsRules, origin, req.headers['access-control-request-method'] || method);
+    if (rule) {
+      res.setHeader('Access-Control-Allow-Origin', rule.allowedOrigins.includes('*') ? '*' : origin);
+      res.setHeader('Vary', 'Origin');
+      if (rule.exposeHeaders?.length) res.setHeader('Access-Control-Expose-Headers', rule.exposeHeaders.join(', '));
+    }
+  }
+  if (method === 'OPTIONS') {
+    const rules = store.s3.buckets[bucketName]?.corsRules;
+    if (origin && rules && rules.length) {
+      const rule = matchCorsRule(rules, origin, req.headers['access-control-request-method'] || 'GET');
+      if (!rule) return s3Error(res, 403, 'AccessForbidden', 'CORSResponse: This CORS request is not allowed.');
+      res.writeHead(200, {
+        'Access-Control-Allow-Origin':  rule.allowedOrigins.includes('*') ? '*' : origin,
+        'Access-Control-Allow-Methods': rule.allowedMethods.join(', '),
+        'Access-Control-Allow-Headers': req.headers['access-control-request-headers'] || (rule.allowedHeaders || []).join(', '),
+        'Access-Control-Max-Age':       String(rule.maxAgeSeconds || 3000),
+        'Vary': 'Origin',
+      });
+      res.end(); return;
+    }
+    res.writeHead(204); res.end(); return;
+  }
+
   // ── Create bucket ───────────────────────────────────────────────────────
   // Guard: sub-resource PUTs (?website, ?acl, etc.) also have !objectKey — skip them here
   const hasSubResource = url.searchParams.has('website') || url.searchParams.has('acl') ||
@@ -211,12 +242,16 @@ export async function handler(req, res) {
   if (!objectKey && url.searchParams.has('cors')) {
     const bucket = store.s3.buckets[bucketName];
     if (!bucket) return s3Error(res, 404, 'NoSuchBucket', `Bucket ${bucketName} does not exist`);
-    if (method === 'PUT') { bucket.cors = getRawBuffer(req).toString(); res.writeHead(200); res.end(); return; }
+    if (method === 'PUT') {
+      bucket.cors      = getRawBuffer(req).toString();   // kept verbatim for GET round-trips
+      bucket.corsRules = parseCorsRules(bucket.cors);
+      res.writeHead(200); res.end(); return;
+    }
     if (method === 'GET') {
       if (!bucket.cors) return s3Error(res, 404, 'NoSuchCORSConfiguration', 'No CORS configuration');
       return xmlResponse(res, 200, bucket.cors);
     }
-    if (method === 'DELETE') { bucket.cors = null; res.writeHead(204); res.end(); return; }
+    if (method === 'DELETE') { bucket.cors = null; bucket.corsRules = null; res.writeHead(204); res.end(); return; }
   }
 
   // ── Bucket sub-resource: ?notification ────────────────────────────────────
@@ -680,4 +715,47 @@ async function deliverNotification(cfg, event) {
     const { invokeLambda } = await import('./lambda.js');
     await invokeLambda(cfg.arn.split(':').pop(), event, { source: 's3' });
   }
+}
+
+// ── CORS rules ──────────────────────────────────────────────────────────────
+function parseCorsRules(xml) {
+  const rules = [];
+  const ruleRe = /<CORSRule>([\s\S]*?)<\/CORSRule>/g;
+  let m;
+  while ((m = ruleRe.exec(xml)) !== null) {
+    const inner = m[1];
+    const maxAge = inner.match(/<MaxAgeSeconds>(\d+)<\/MaxAgeSeconds>/);
+    rules.push({
+      allowedOrigins: allTagValues(inner, 'AllowedOrigin'),
+      allowedMethods: allTagValues(inner, 'AllowedMethod'),
+      allowedHeaders: allTagValues(inner, 'AllowedHeader'),
+      exposeHeaders:  allTagValues(inner, 'ExposeHeader'),
+      maxAgeSeconds:  maxAge ? parseInt(maxAge[1], 10) : null,
+    });
+  }
+  return rules;
+}
+
+function allTagValues(xml, tag) {
+  const re = new RegExp(`<${tag}>([^<]*)<\\/${tag}>`, 'g');
+  const out = []; let m;
+  while ((m = re.exec(xml)) !== null) out.push(m[1]);
+  return out;
+}
+
+// Find a CORS rule whose methods include `method` and whose origins include
+// `origin` (exact, '*', or a single-'*' wildcard like https://*.example.com).
+function matchCorsRule(rules, origin, method) {
+  if (!rules) return null;
+  const meth = (method || '').toUpperCase();
+  return rules.find(r =>
+    (r.allowedMethods || []).some(m => m.toUpperCase() === meth) &&
+    (r.allowedOrigins || []).some(o => o === '*' || o === origin || corsOriginMatch(o, origin))
+  ) || null;
+}
+
+function corsOriginMatch(pattern, value) {
+  if (!pattern.includes('*')) return pattern === value;
+  const re = new RegExp('^' + pattern.split('*').map(p => p.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
+  return re.test(value || '');
 }

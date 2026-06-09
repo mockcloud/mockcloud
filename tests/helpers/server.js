@@ -32,7 +32,9 @@ export async function startServer() {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, HEAD, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Amz-Target, X-Amz-Date, X-Amz-Security-Token, X-Amz-Content-Sha256, X-Api-Key, X-Amz-User-Agent');
-    if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+    // Match the daemon: only short-circuit OPTIONS for the UI control plane so
+    // S3 CORS preflight (OPTIONS to a bucket) reaches the S3 handler.
+    if (req.method === 'OPTIONS' && req.url.startsWith('/mockcloud')) { res.writeHead(204); res.end(); return; }
 
     req.rawBuffer = await readBody(req);
     req.rawBody = req.rawBuffer.toString();
