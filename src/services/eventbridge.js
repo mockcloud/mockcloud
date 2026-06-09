@@ -3,6 +3,7 @@
 // RemoveTargets, ListTargetsByRule — with actual event firing to Lambda targets
 import { store, randomId, arn } from '../store.js';
 import { jsonResponse, errorJson } from '../middleware/response.js';
+import { registerTick } from '../lifecycle.js';
 
 function parseBody(req) {
   try { return JSON.parse(req.rawBody || '{}'); } catch { return {}; }
@@ -101,14 +102,8 @@ async function fireMatchingRules(entry) {
   const busData = store.eventbridge.buses[bus];
   if (!busData) return;
 
-  // Lazy imports to avoid module-load circular dependencies.
-  const [{ invokeLambda }, { enqueueMessage, queueUrlForArn }] = await Promise.all([
-    import('./lambda.js'),
-    import('./sqs.js'),
-  ]);
-
-  // EventBridge wraps the user's Detail in this envelope when delivering
-  // to targets. Most consumers (Lambda especially) parse this shape.
+  // EventBridge wraps the user's Detail in this envelope when delivering to
+  // targets. Most consumers (Lambda especially) parse this shape.
   const eventEnvelope = {
     version:      '0',
     id:           randomId(36),
@@ -124,47 +119,80 @@ async function fireMatchingRules(entry) {
   for (const rule of Object.values(busData.rules)) {
     if (rule.State !== 'ENABLED') continue;
     if (!matchesPattern(rule.EventPattern, entry)) continue;
+    await deliverToTargets(rule, eventEnvelope);
+  }
+}
 
-    for (const target of (rule.targets || [])) {
-      try {
-        // Lambda target
-        if (target.Arn?.includes(':lambda:') || target.Arn?.includes(':function:')) {
-          const fnName = target.Arn.split(':').pop();
-          invokeLambda(fnName, eventEnvelope, { source: 'eventbridge' }).catch(()=>{});
-          continue;
-        }
-        // SQS target
-        if (target.Arn?.includes(':sqs:')) {
-          const url = queueUrlForArn(target.Arn);
-          if (url && store.sqs.queues[url]) {
-            enqueueMessage(url, JSON.stringify(eventEnvelope));
-          }
-          continue;
-        }
-        // SNS target — re-publish to the topic so its subscribers fan out
-        if (target.Arn?.includes(':sns:')) {
-          const topic = store.sns.topics[target.Arn];
-          if (topic) {
-            topic.published = (topic.published || 0) + 1;
-            // Trigger SNS fanout via dynamic import to avoid pulling sns.js
-            // into module-load graph circularly.
-            const { fanoutSnsMessage } = await import('./sns.js').catch(() => ({}));
-            if (fanoutSnsMessage) {
-              fanoutSnsMessage(topic, {
-                msgId:   randomId(36),
-                message: JSON.stringify(eventEnvelope),
-                subject: `${entry.Source} / ${entry['detail-type'] || entry.DetailType}`,
-              }).catch(()=>{});
-            }
-          }
-          continue;
-        }
-      } catch (e) {
-        console.warn(`[EventBridge] Target delivery failed (${target.Arn}):`, e.message);
+// Deliver an envelope to every target of a rule. Shared by event-matched
+// delivery (PutEvents) and schedule-driven delivery (fireDueSchedulesOnce).
+async function deliverToTargets(rule, envelope) {
+  // Lazy imports to avoid module-load circular dependencies.
+  const [{ invokeLambda }, { enqueueMessage, queueUrlForArn }] = await Promise.all([
+    import('./lambda.js'),
+    import('./sqs.js'),
+  ]);
+  for (const target of (rule.targets || [])) {
+    try {
+      if (target.Arn?.includes(':lambda:') || target.Arn?.includes(':function:')) {
+        invokeLambda(target.Arn.split(':').pop(), envelope, { source: 'eventbridge' }).catch(() => {});
+        continue;
       }
+      if (target.Arn?.includes(':sqs:')) {
+        const url = queueUrlForArn(target.Arn);
+        if (url && store.sqs.queues[url]) enqueueMessage(url, JSON.stringify(envelope));
+        continue;
+      }
+      if (target.Arn?.includes(':sns:')) {
+        const topic = store.sns.topics[target.Arn];
+        if (topic) {
+          topic.published = (topic.published || 0) + 1;
+          const { fanoutSnsMessage } = await import('./sns.js').catch(() => ({}));
+          if (fanoutSnsMessage) {
+            fanoutSnsMessage(topic, { msgId: randomId(36), message: JSON.stringify(envelope), subject: envelope['detail-type'] || '' }).catch(() => {});
+          }
+        }
+        continue;
+      }
+    } catch (e) {
+      console.warn(`[EventBridge] Target delivery failed (${target.Arn}):`, e.message);
     }
   }
 }
+
+// ── Scheduled rules (rate/cron) ────────────────────────────────────────────
+// rate(N unit) is exact; cron(...) is approximated to a ~1-minute cadence (full
+// cron-field parsing isn't implemented). Registered as a background tick;
+// fireDueSchedulesOnce(now) is exported so tests can drive it deterministically.
+function parseSchedule(expr) {
+  const m = /^rate\((\d+)\s+(minute|minutes|hour|hours|day|days)\)$/.exec(expr || '');
+  if (m) {
+    const ms = m[2].startsWith('minute') ? 60_000 : m[2].startsWith('hour') ? 3_600_000 : 86_400_000;
+    return Number(m[1]) * ms;
+  }
+  if (/^cron\(/.test(expr || '')) return 60_000;
+  return 0;
+}
+
+export async function fireDueSchedulesOnce(now = Date.now()) {
+  for (const bus of Object.values(store.eventbridge.buses || {})) {
+    for (const rule of Object.values(bus.rules || {})) {
+      if (rule.State !== 'ENABLED' || !rule.ScheduleExpression) continue;
+      const intervalMs = parseSchedule(rule.ScheduleExpression);
+      if (!intervalMs) continue;
+      if (rule._nextFireAt == null) rule._nextFireAt = (rule.created || now) + intervalMs;
+      if (now < rule._nextFireAt) continue;
+      rule._nextFireAt = now + intervalMs;
+      rule._lastFiredAt = now;
+      await deliverToTargets(rule, {
+        version: '0', id: randomId(36), 'detail-type': 'Scheduled Event',
+        source: 'aws.events', account: '000000000000', time: new Date(now).toISOString(),
+        region: 'us-east-1', resources: [rule.Arn], detail: {},
+      });
+    }
+  }
+}
+
+registerTick(() => { fireDueSchedulesOnce().catch(() => {}); });
 
 function safeParseDetail(d) {
   if (!d) return {};
