@@ -9,6 +9,7 @@ import { dispatchAWS } from './dispatcher.js';
 import { registerAllRoutes } from './routes/index.js';
 import { sendInternalError } from './middleware/response.js';
 import { sigv4Enabled, verifySigV4, sendSigV4Error } from './middleware/sigv4.js';
+import { iamMode, enforceIam, sendIamError } from './iam/policy-eval.js';
 import { startBackground, stopBackground } from './lifecycle.js';
 import { VERSION } from './version.js';
 
@@ -66,6 +67,10 @@ const awsServer = http.createServer(async (req, res) => {
       if (sigv4Enabled()) {
         const authErr = verifySigV4(req);
         if (authErr) return sendSigV4Error(req, res, authErr);
+      }
+      if (iamMode() !== 'off') {
+        const iamErr = enforceIam(req);
+        if (iamErr) return sendIamError(req, res, iamErr);
       }
       await dispatchAWS(req, res);
     }

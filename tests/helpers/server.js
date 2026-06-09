@@ -13,6 +13,7 @@ import { dispatchAWS } from '../../src/dispatcher.js';
 import { registerAllRoutes } from '../../src/routes/index.js';
 import { sendInternalError } from '../../src/middleware/response.js';
 import { sigv4Enabled, verifySigV4, sendSigV4Error } from '../../src/middleware/sigv4.js';
+import { iamMode, enforceIam, sendIamError } from '../../src/iam/policy-eval.js';
 import { startBackground, stopBackground } from '../../src/lifecycle.js';
 
 function readBody(req) {
@@ -49,6 +50,10 @@ export async function startServer() {
         if (sigv4Enabled()) {
           const authErr = verifySigV4(req);
           if (authErr) return sendSigV4Error(req, res, authErr);
+        }
+        if (iamMode() !== 'off') {
+          const iamErr = enforceIam(req);
+          if (iamErr) return sendIamError(req, res, iamErr);
         }
         await dispatchAWS(req, res);
       }
