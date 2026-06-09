@@ -133,7 +133,8 @@ export async function handler(req, res) {
 }
 
 // ── JSON protocol handler (AWS SDK v2 / Terraform provider v5) ──────────────
-function handleJsonProtocol(req, res, action, payload) {
+// async because ReceiveMessage supports WaitTimeSeconds long polling.
+async function handleJsonProtocol(req, res, action, payload) {
   switch (action) {
     case 'CreateQueue': {
       const name = payload.QueueName;
@@ -206,10 +207,40 @@ function handleJsonProtocol(req, res, action, payload) {
         return jsonResponse(res, 400, { __type: 'MissingParameter', message: 'The request must contain the parameter MessageGroupId.' });
       }
       const msgBody = payload.MessageBody || '';
-      const msg = enqueueMessage(url, msgBody, { dedupeId: payload.MessageDeduplicationId, groupId: payload.MessageGroupId });
+      const msg = enqueueMessage(url, msgBody, {
+        dedupeId: payload.MessageDeduplicationId,
+        groupId: payload.MessageGroupId,
+        delaySeconds: payload.DelaySeconds,
+        attributes: payload.MessageAttributes,
+      });
       const out = { MessageId: msg.id, MD5OfMessageBody: md5(msgBody) };
+      if (hasAttributes(payload.MessageAttributes)) out.MD5OfMessageAttributes = md5OfMessageAttributes(payload.MessageAttributes);
       if (q.type === 'fifo') out.SequenceNumber = msg.sequenceNumber;
       return jsonResponse(res, 200, out);
+    }
+    case 'SendMessageBatch': {
+      const url = payload.QueueUrl;
+      const q = store.sqs.queues[url];
+      if (!q) return jsonResponse(res, 400, { __type: 'QueueDoesNotExist', message: 'Queue not found' });
+      const Successful = [], Failed = [];
+      for (const e of payload.Entries || []) {
+        if (q.type === 'fifo' && !e.MessageGroupId) {
+          Failed.push({ Id: e.Id, Code: 'MissingParameter', Message: 'The request must contain the parameter MessageGroupId.', SenderFault: true });
+          continue;
+        }
+        const body = e.MessageBody || '';
+        const msg = enqueueMessage(url, body, {
+          dedupeId: e.MessageDeduplicationId,
+          groupId: e.MessageGroupId,
+          delaySeconds: e.DelaySeconds,
+          attributes: e.MessageAttributes,
+        });
+        const entry = { Id: e.Id, MessageId: msg.id, MD5OfMessageBody: md5(body) };
+        if (hasAttributes(e.MessageAttributes)) entry.MD5OfMessageAttributes = md5OfMessageAttributes(e.MessageAttributes);
+        if (q.type === 'fifo') entry.SequenceNumber = msg.sequenceNumber;
+        Successful.push(entry);
+      }
+      return jsonResponse(res, 200, { Successful, Failed });
     }
     case 'ReceiveMessage': {
       const url = payload.QueueUrl;
@@ -217,23 +248,75 @@ function handleJsonProtocol(req, res, action, payload) {
       if (!q) return jsonResponse(res, 400, { __type: 'QueueDoesNotExist', message: 'Queue not found' });
       const maxMsgs = payload.MaxNumberOfMessages || 1;
       const visMs = (payload.VisibilityTimeout ?? 30) * 1000;
-      const msgs = selectMessages(q, maxMsgs);
+      // Long polling: wait up to WaitTimeSeconds (cap 20s) for a message to
+      // appear, polling on a short unref'd timer. Falls back to the queue's
+      // ReceiveMessageWaitTimeSeconds attribute. Bails if the queue is deleted.
+      const waitSec = Math.min(payload.WaitTimeSeconds ?? (Number(q.attributes?.ReceiveMessageWaitTimeSeconds) || 0), 20);
+      let msgs = selectMessages(q, maxMsgs);
+      if (waitSec > 0 && msgs.length === 0) {
+        const deadline = Date.now() + waitSec * 1000;
+        while (msgs.length === 0 && Date.now() < deadline) {
+          await new Promise(r => { const t = setTimeout(r, 50); t.unref?.(); });
+          const qNow = store.sqs.queues[url];
+          if (!qNow) break;
+          msgs = selectMessages(qNow, maxMsgs);
+        }
+      }
       msgs.forEach(m => hideMessage(m, visMs));
       return jsonResponse(res, 200, {
-        Messages: msgs.map(m => ({
-          MessageId: m.id, ReceiptHandle: m.receiptHandle, Body: m.body, MD5OfBody: md5(m.body),
-          Attributes: {
-            ApproximateReceiveCount: String(m.approxReceiveCount || 1),
-            SentTimestamp: String(m.sent),
-            ...(q.type === 'fifo' ? { MessageGroupId: m.groupId, SequenceNumber: m.sequenceNumber, ...(m.dedupeId ? { MessageDeduplicationId: m.dedupeId } : {}) } : {}),
-          },
-        }))
+        Messages: msgs.map(m => {
+          const out = {
+            MessageId: m.id, ReceiptHandle: m.receiptHandle, Body: m.body, MD5OfBody: md5(m.body),
+            Attributes: {
+              ApproximateReceiveCount: String(m.approxReceiveCount || 1),
+              SentTimestamp: String(m.sent),
+              ...(q.type === 'fifo' ? { MessageGroupId: m.groupId, SequenceNumber: m.sequenceNumber, ...(m.dedupeId ? { MessageDeduplicationId: m.dedupeId } : {}) } : {}),
+            },
+          };
+          if (hasAttributes(m.messageAttributes)) {
+            out.MessageAttributes = m.messageAttributes;
+            out.MD5OfMessageAttributes = md5OfMessageAttributes(m.messageAttributes);
+          }
+          return out;
+        })
       });
     }
     case 'DeleteMessage': {
       const q = store.sqs.queues[payload.QueueUrl];
       if (q) q.messages = removeAndCancel(q.messages, m => m.receiptHandle === payload.ReceiptHandle);
       return jsonResponse(res, 200, {});
+    }
+    case 'DeleteMessageBatch': {
+      const q = store.sqs.queues[payload.QueueUrl];
+      if (!q) return jsonResponse(res, 400, { __type: 'QueueDoesNotExist', message: 'Queue not found' });
+      const Successful = [], Failed = [];
+      for (const e of payload.Entries || []) {
+        const before = q.messages.length;
+        q.messages = removeAndCancel(q.messages, m => m.receiptHandle === e.ReceiptHandle);
+        if (q.messages.length < before) Successful.push({ Id: e.Id });
+        else Failed.push({ Id: e.Id, Code: 'ReceiptHandleIsInvalid', Message: 'The receipt handle does not match any message.', SenderFault: true });
+      }
+      return jsonResponse(res, 200, { Successful, Failed });
+    }
+    case 'ChangeMessageVisibility': {
+      const q = store.sqs.queues[payload.QueueUrl];
+      if (!q) return jsonResponse(res, 400, { __type: 'QueueDoesNotExist', message: 'Queue not found' });
+      const m = q.messages.find(m => m.receiptHandle === payload.ReceiptHandle);
+      if (!m) return jsonResponse(res, 400, { __type: 'ReceiptHandleIsInvalid', message: 'The receipt handle does not match any message.' });
+      setInvisible(m, (payload.VisibilityTimeout ?? 30) * 1000);
+      return jsonResponse(res, 200, {});
+    }
+    case 'ChangeMessageVisibilityBatch': {
+      const q = store.sqs.queues[payload.QueueUrl];
+      if (!q) return jsonResponse(res, 400, { __type: 'QueueDoesNotExist', message: 'Queue not found' });
+      const Successful = [], Failed = [];
+      for (const e of payload.Entries || []) {
+        const m = q.messages.find(m => m.receiptHandle === e.ReceiptHandle);
+        if (!m) { Failed.push({ Id: e.Id, Code: 'ReceiptHandleIsInvalid', Message: 'The receipt handle does not match any message.', SenderFault: true }); continue; }
+        setInvisible(m, (e.VisibilityTimeout ?? 30) * 1000);
+        Successful.push({ Id: e.Id });
+      }
+      return jsonResponse(res, 200, { Successful, Failed });
     }
     default:
       return jsonResponse(res, 400, { __type: 'InvalidAction', message: `Unknown SQS action: ${action}` });
@@ -377,6 +460,10 @@ export function removeAndCancel(messages, predicate) {
 
 function md5(str) {
   return crypto.createHash('md5').update(String(str)).digest('hex');
+}
+
+function hasAttributes(attrs) {
+  return attrs && typeof attrs === 'object' && Object.keys(attrs).length > 0;
 }
 
 // AWS-canonical MD5 of message attributes: sorted names, each field length-
