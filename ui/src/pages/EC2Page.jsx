@@ -19,65 +19,17 @@ const TYPES = [
   { id: 'c6i.xlarge', cpu: '4 vCPU', mem: '8 GiB' },
 ];
 
-// EC2 execution mode — display labels only; wire values stay 'lite'/'vmm'
-// so the CLI flag --ec2=docker|simulated and existing API contract are unchanged.
-const MODES = [
-  { value: 'lite', label: 'Simulated', hint: 'Fake state, no Docker required' },
-  { value: 'vmm', label: 'Docker', hint: 'Real containers via Docker daemon' },
-];
-const modeLabel = v => MODES.find(m => m.value === v)?.label || v;
-
-function ModeToggle({ mode, onChange, dockerAvailable, onDockerUnavailableClick, disabled }) {
-  return (
-    <div className="mode-toggle" role="group" aria-label="EC2 execution mode">
-      {MODES.map(m => {
-        const isActive = mode === m.value;
-        const isDocker = m.value === 'vmm';
-        const isBlocked = isDocker && dockerAvailable === false;
-        const handleClick = () => {
-          if (disabled || isActive) return;
-          if (isBlocked) { onDockerUnavailableClick?.(); return; }
-          onChange(m.value);
-        };
-        const title = isBlocked
-          ? 'Docker daemon not detected — click for details'
-          : m.hint;
-        return (
-          <button
-            key={m.value}
-            type="button"
-            className={`mode-toggle-btn ${isActive ? 'active' : ''} ${isBlocked ? 'blocked' : ''}`}
-            onClick={handleClick}
-            disabled={disabled}
-            title={title}
-            aria-pressed={isActive}
-          >
-            {isDocker && dockerAvailable !== null && (
-              <span className={`mode-dot ${dockerAvailable ? 'up' : 'down'}`} aria-hidden />
-            )}
-            {m.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
 function stateKind(s) {
   return { running: 'ok', pending: 'pending', stopped: 'stopped', terminated: 'err' }[s] || 'stopped';
 }
 
-export function EC2Page({ pushToast, setCurrent, setTerminalTarget, status }) {
+export function EC2Page({ pushToast, setCurrent, setTerminalTarget }) {
   const [instances, setInstances] = useState([]);
   const [q, setQ] = useState('');
   const [stateFilter, setStateFilter] = useState('all');
   const [selected, setSelected] = useState(new Set());
   const [showLaunch, setShowLaunch] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [mode, setMode] = useState('vmm');
-  const [dockerAvailable, setDockerAvailable] = useState(null); // null = unknown yet
-  const [dockerHint, setDockerHint] = useState('');
-  const [dockerModalOpen, setDockerModalOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -87,30 +39,6 @@ export function EC2Page({ pushToast, setCurrent, setTerminalTarget, status }) {
   }, []);
 
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
-
-  // Sync local state from the polled status. Detects three transitions:
-  //   1. mode change (e.g. CLI rewrote it, or auto-fallback flipped to lite)
-  //   2. dockerAvailable change (UI dot follows daemon up/down events)
-  //   3. auto-fallback: status flips us from vmm→lite while docker went down
-  useEffect(() => {
-    if (!status) return;
-    const wasVmm = mode === 'vmm';
-    const nowLite = status.ec2Mode === 'lite';
-    const dockerDown = status.dockerAvailable === false;
-    if (status.ec2Mode) setMode(status.ec2Mode);
-    if (typeof status.dockerAvailable === 'boolean') {
-      setDockerAvailable(status.dockerAvailable);
-    }
-    // Auto-fallback toast — only when we observe the transition, not on initial load.
-    if (wasVmm && nowLite && dockerDown) {
-      pushToast({
-        kind: 'warn',
-        title: 'Docker became unavailable',
-        body: 'Switched to Simulated mode. New instances will be in-memory only.',
-      });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status?.ec2Mode, status?.dockerAvailable]);
 
   const filtered = instances.filter(x => {
     if (stateFilter !== 'all' && x.state !== stateFilter) return false;
@@ -135,66 +63,6 @@ export function EC2Page({ pushToast, setCurrent, setTerminalTarget, status }) {
     } catch (e) { pushToast({ kind: 'err', title: 'Launch failed', body: e.message }); }
   };
 
-  const onModeChange = async (next) => {
-    // If switching TO docker, do a fresh client-side ping first so the toggle
-    // doesn't optimistically flip and then snap back. Server will also guard.
-    if (next === 'vmm') {
-      try {
-        const probe = await api.ec2.dockerStatus();
-        if (!probe.available) {
-          setDockerHint(probe.hint || '');
-          setDockerAvailable(false);
-          setDockerModalOpen(true);
-          return;
-        }
-      } catch (e) {
-        pushToast({ kind: 'err', title: 'Docker check failed', body: e.message });
-        return;
-      }
-    }
-
-    const prev = mode;
-    setMode(next); // optimistic flip
-    try {
-      await api.ec2.setMode(next);
-      pushToast({ kind: 'ok', title: 'EC2 mode changed', body: `Now: ${modeLabel(next)}` });
-    } catch (e) {
-      setMode(prev); // rollback
-      // Server returns 409 + hint when Docker unavailable — show the popup
-      // with the platform-specific instructions instead of a generic toast.
-      if (e.status === 409 && e.body?.error === 'docker_unavailable') {
-        setDockerHint(e.body.hint || '');
-        setDockerAvailable(false);
-        setDockerModalOpen(true);
-      } else {
-        pushToast({ kind: 'err', title: 'Mode change failed', body: e.message });
-      }
-    }
-  };
-
-  const onDockerUnavailableClick = () => {
-    // Refresh the hint from the latest probe before showing the modal so the
-    // user gets the most accurate platform-specific instructions.
-    api.ec2.dockerStatus()
-      .then(p => { setDockerHint(p.hint || ''); setDockerAvailable(p.available); })
-      .catch(() => { });
-    setDockerModalOpen(true);
-  };
-
-  const onRetryDocker = async () => {
-    try {
-      const probe = await api.ec2.dockerStatus();
-      setDockerAvailable(probe.available);
-      setDockerHint(probe.hint || '');
-      if (probe.available) {
-        setDockerModalOpen(false);
-        pushToast({ kind: 'ok', title: 'Docker detected', body: 'You can switch to Docker mode now.' });
-      }
-    } catch (e) {
-      pushToast({ kind: 'err', title: 'Recheck failed', body: e.message });
-    }
-  };
-
   return (
     <>
       <Breadcrumb items={['Console Home', 'EC2', 'Instances']} />
@@ -208,12 +76,6 @@ export function EC2Page({ pushToast, setCurrent, setTerminalTarget, status }) {
             </div>
           </div>
           <div className="page-actions">
-            <ModeToggle
-              mode={mode}
-              onChange={onModeChange}
-              dockerAvailable={dockerAvailable}
-              onDockerUnavailableClick={onDockerUnavailableClick}
-            />
             <Button icon={Icons.IconRefresh} onClick={load}>Refresh</Button>
             <Button variant="primary" icon={Icons.IconPlus} onClick={() => setShowLaunch(true)}>Launch instance</Button>
           </div>
@@ -300,32 +162,12 @@ export function EC2Page({ pushToast, setCurrent, setTerminalTarget, status }) {
         </Card>
       </div>
 
-      {showLaunch && <LaunchModal onClose={() => setShowLaunch(false)} onLaunch={onLaunch} mode={mode} />}
-      {dockerModalOpen && (
-        <Modal title="Docker is not running" onClose={() => setDockerModalOpen(false)}
-          footer={<>
-            <Button variant="ghost" onClick={() => setDockerModalOpen(false)}>Close</Button>
-            <Button variant="primary" icon={Icons.IconRefresh} onClick={onRetryDocker}>Recheck</Button>
-          </>}>
-          <p style={{ margin: '0 0 12px', color: 'var(--muted)', lineHeight: 1.55 }}>
-            Docker mode launches each EC2 instance as a real container. The Docker daemon isn't
-            reachable right now, so MockCloud is staying in Simulated mode.
-          </p>
-          <div className="docker-hint-box">
-            <strong>To enable Docker mode:</strong>
-            <p style={{ margin: '6px 0 0', lineHeight: 1.5 }}>{dockerHint || 'Start the Docker daemon and try again.'}</p>
-          </div>
-          <p style={{ margin: '12px 0 0', fontSize: 12, color: 'var(--muted)' }}>
-            Simulated mode works without Docker — instances are in-memory only, but every other
-            MockCloud feature is fully available.
-          </p>
-        </Modal>
-      )}
+      {showLaunch && <LaunchModal onClose={() => setShowLaunch(false)} onLaunch={onLaunch} />}
     </>
   );
 }
 
-function LaunchModal({ onClose, onLaunch, mode }) {
+function LaunchModal({ onClose, onLaunch }) {
   const [name, setName] = useState('my-server');
   const [ami, setAmi] = useState(AMIS[0].id);
   const [type, setType] = useState('t3.small');
@@ -334,17 +176,6 @@ function LaunchModal({ onClose, onLaunch, mode }) {
   return (
     <Modal title="Launch instance" onClose={onClose} wide
       footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" icon={Icons.IconPlay} onClick={() => onLaunch({ name, ami, type, assignPublicIp: pubIp })}>Launch</Button></>}>
-      <div className="launch-mode-banner" data-mode={mode}>
-        <div className="launch-mode-banner-row">
-          <span className="launch-mode-label">Execution mode</span>
-          <span className={`launch-mode-pill ${mode}`}>{modeLabel(mode)}</span>
-        </div>
-        <span className="launch-mode-hint">
-          {mode === 'vmm'
-            ? 'This instance will run as a real Docker container. Requires Docker daemon.'
-            : 'Simulated instance — state only, no container will be created.'}
-        </span>
-      </div>
       <div className="field">
         <label className="field-label">Name</label>
         <input autoFocus className="input" value={name} onChange={e => setName(e.target.value)} placeholder="my-server" style={{ height: 34 }} />

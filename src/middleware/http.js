@@ -93,7 +93,11 @@ export function applyCors(req, res, scope = detectScope(req)) {
   res.setHeader('Access-Control-Expose-Headers',
     'ETag, x-amz-request-id, x-amz-id-2, x-amz-version-id');
 
-  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return false; }
+  // UI / terminal preflight is answered here. S3 (aws scope) CORS preflight
+  // must reach the S3 handler, which enforces per-bucket CORS rules — so let
+  // aws-scope OPTIONS fall through. OPTIONS is non-mutating, so the
+  // cross-origin write gate below doesn't apply to it regardless.
+  if (req.method === 'OPTIONS' && scope !== 'aws') { res.writeHead(204); res.end(); return false; }
 
   // Terminal endpoints spawn shells. Only the local UI may call — require
   // Origin to be present AND in the allowlist.

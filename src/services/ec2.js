@@ -159,37 +159,15 @@ export async function handler(req, res) {
           publicIp: pubIp ? `203.0.${Math.floor(Math.random()*200)+10}.${Math.floor(Math.random()*254)+1}` : null,
           vcpu: specs.vcpu, mem: specs.mem,
           launched: Date.now(),
-          containerId: null, containerStatus: 'n/a',
         };
         store.ec2.instances[id] = instance;
         created.push(instance);
       }
 
-      // In simulated (lite) mode, never touch Docker — just run the simulated
-      // state-transition timer. Spawning Docker here used to fire even with
-      // --ec2=simulated, which produced noisy errors and slow tests.
-      if (store.ec2.mode === 'vmm') {
-        try {
-          const { spawnDockerContainer } = await import('./docker.js');
-          for (const inst of created) {
-            const containerId = await spawnDockerContainer(inst);
-            inst.containerId    = containerId;
-            inst.containerStatus = 'running';
-            inst.state           = 'running';
-          }
-        } catch (e) {
-          console.log(`[EC2] Docker unavailable (${e.message.split('\n')[0]}), using simulated instances`);
-          created.forEach(inst => {
-            const t = setTimeout(() => { if (store.ec2.instances[inst.id]) store.ec2.instances[inst.id].state = 'running'; }, 2000);
-            t.unref?.();
-          });
-        }
-      } else {
-        created.forEach(inst => {
-          const t = setTimeout(() => { if (store.ec2.instances[inst.id]) store.ec2.instances[inst.id].state = 'running'; }, 2000);
-          t.unref?.();
-        });
-      }
+      created.forEach(inst => {
+        const t = setTimeout(() => { if (store.ec2.instances[inst.id]) store.ec2.instances[inst.id].state = 'running'; }, 2000);
+        t.unref?.();
+      });
 
       const items = created.map(i => `<item>
         <instanceId>${i.id}</instanceId>
@@ -207,10 +185,18 @@ export async function handler(req, res) {
         const inst = store.ec2.instances[id];
         const prev = inst?.state || 'terminated';
         if (inst) {
-          inst.state = 'terminated';
-          dockerActionFor(inst, 'terminate');
-          const t = setTimeout(() => delete store.ec2.instances[id], 5000);
-          t.unref?.();
+          inst.state = 'shutting-down';
+          // Transition to terminated after 1s so Terraform's DescribeInstances
+          // waiter sees the correct terminal state instead of NotFound.
+          // Previously the instance was deleted after 5s, which caused the provider
+          // to get InvalidInstanceID.NotFound and time out for 3 minutes.
+          const t1 = setTimeout(() => {
+            if (store.ec2.instances[id]) store.ec2.instances[id].state = 'terminated';
+          }, 1000);
+          t1.unref?.();
+          // Clean up from store after 5 minutes — long past any TF waiter poll cycle.
+          const t2 = setTimeout(() => delete store.ec2.instances[id], 300_000);
+          t2.unref?.();
         }
         return `<item><instanceId>${id}</instanceId><previousState><name>${prev}</name></previousState><currentState><name>shutting-down</name></currentState></item>`;
       });
@@ -223,7 +209,6 @@ export async function handler(req, res) {
         const inst = store.ec2.instances[id];
         if (inst) {
           inst.state = 'stopped';
-          dockerActionFor(inst, 'stop');
         }
       });
       return xmlResponse(res, 200, ec2Wrap('StopInstancesResponse',
@@ -236,7 +221,6 @@ export async function handler(req, res) {
         const inst = store.ec2.instances[id];
         if (inst) {
           inst.state = 'pending';
-          dockerActionFor(inst, 'start');
           const t = setTimeout(() => { if (inst) inst.state = 'running'; }, 2000);
           t.unref?.();
         }
@@ -558,11 +542,3 @@ function filterRevoked(existing, params) {
   ));
 }
 
-// Fire-and-forget Docker action for an instance that has a container.
-// Lazy-imports docker.js so this stays a no-op when Docker isn't available.
-function dockerActionFor(instance, action) {
-  if (!instance?.containerId) return;
-  import('./docker.js')
-    .then(({ dockerAction }) => dockerAction(instance.containerId, action))
-    .catch(()=>{});
-}

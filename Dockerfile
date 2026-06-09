@@ -10,9 +10,6 @@ RUN npm run build
 # ── Stage 2: production image ──────────────────────────────────────────────────
 FROM node:20-alpine
 
-# Install Docker CLI (for EC2 VMM mode via socket mount)
-RUN apk add --no-cache docker-cli
-
 WORKDIR /app
 
 # Install backend deps
@@ -30,6 +27,4 @@ ENV PORT=4566
 ENV UI_PORT=4567
 ENV HOST=0.0.0.0
 
-# Default to lite EC2 (no Docker-in-Docker needed)
 ENTRYPOINT ["node", "src/index.js"]
-CMD ["--ec2=lite"]

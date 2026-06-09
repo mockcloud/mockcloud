@@ -31,6 +31,7 @@ export async function handler(req, res) {
           type: name.endsWith('.fifo') ? 'fifo' : 'standard',
           attributes: {}, messages: [], created: Date.now(),
         };
+        store.addTrail({ method: 'POST', path: `/sqs/CreateQueue/${name}`, status: 200, latency: 2 });
       }
       return xmlResponse(res, 200, sqsWrap('CreateQueueResponse', 'CreateQueueResult', `<QueueUrl>${escapeXml(url)}</QueueUrl>`));
     }
@@ -46,7 +47,9 @@ export async function handler(req, res) {
     }
     case 'DeleteQueue': {
       const url = params.get('QueueUrl');
+      const qName = store.sqs.queues[url]?.name || url.split('/').pop();
       delete store.sqs.queues[url];
+      store.addTrail({ method: 'POST', path: `/sqs/DeleteQueue/${qName}`, status: 200, latency: 1 });
       return xmlResponse(res, 200, sqsWrap('DeleteQueueResponse','DeleteQueueResult',''));
     }
     case 'PurgeQueue': {
@@ -74,10 +77,14 @@ export async function handler(req, res) {
       const url = params.get('QueueUrl');
       const q = store.sqs.queues[url];
       if (!q) return errorXml(res, 400, 'AWS.SimpleQueueService.NonExistentQueue', 'Queue not found');
+      if (q.type === 'fifo' && !params.get('MessageGroupId')) {
+        return errorXml(res, 400, 'MissingParameter', 'The request must contain the parameter MessageGroupId.');
+      }
       const msgBody = params.get('MessageBody') || '';
-      const msg = enqueueMessage(url, msgBody, { dedupeId: params.get('MessageDeduplicationId') });
+      const msg = enqueueMessage(url, msgBody, { dedupeId: params.get('MessageDeduplicationId'), groupId: params.get('MessageGroupId') });
+      const seqXml = q.type === 'fifo' ? `<SequenceNumber>${msg.sequenceNumber}</SequenceNumber>` : '';
       return xmlResponse(res, 200, sqsWrap('SendMessageResponse','SendMessageResult',
-        `<MessageId>${msg.id}</MessageId><MD5OfMessageBody>${md5(msgBody)}</MD5OfMessageBody>`));
+        `<MessageId>${msg.id}</MessageId><MD5OfMessageBody>${md5(msgBody)}</MD5OfMessageBody>${seqXml}`));
     }
     case 'ReceiveMessage': {
       const url = params.get('QueueUrl');
@@ -85,11 +92,14 @@ export async function handler(req, res) {
       if (!q) return errorXml(res, 400, 'AWS.SimpleQueueService.NonExistentQueue', 'Queue not found');
       const maxMsgs = parseInt(params.get('MaxNumberOfMessages') || '1');
       const visMs = (parseInt(params.get('VisibilityTimeout') || '30')) * 1000;
-      const msgs = q.messages.filter(m => m.visible).slice(0, maxMsgs);
+      const msgs = selectMessages(q, maxMsgs);
       msgs.forEach(m => hideMessage(m, visMs));
-      const xml = msgs.map(m =>
-        `<Message><MessageId>${m.id}</MessageId><ReceiptHandle>${m.receiptHandle}</ReceiptHandle><Body>${escapeXml(m.body)}</Body><MD5OfBody>${md5(m.body)}</MD5OfBody></Message>`
-      ).join('');
+      const xml = msgs.map(m => {
+        const a = { ApproximateReceiveCount: m.approxReceiveCount || 1, SentTimestamp: m.sent,
+          ...(q.type === 'fifo' ? { MessageGroupId: m.groupId, SequenceNumber: m.sequenceNumber } : {}) };
+        const attrXml = Object.entries(a).map(([n, v]) => `<Attribute><Name>${n}</Name><Value>${escapeXml(String(v))}</Value></Attribute>`).join('');
+        return `<Message><MessageId>${m.id}</MessageId><ReceiptHandle>${m.receiptHandle}</ReceiptHandle><Body>${escapeXml(m.body)}</Body><MD5OfBody>${md5(m.body)}</MD5OfBody>${attrXml}</Message>`;
+      }).join('');
       return xmlResponse(res, 200, sqsWrap('ReceiveMessageResponse','ReceiveMessageResult', xml));
     }
     case 'DeleteMessage': {
@@ -123,7 +133,8 @@ export async function handler(req, res) {
 }
 
 // ── JSON protocol handler (AWS SDK v2 / Terraform provider v5) ──────────────
-function handleJsonProtocol(req, res, action, payload) {
+// async because ReceiveMessage supports WaitTimeSeconds long polling.
+async function handleJsonProtocol(req, res, action, payload) {
   switch (action) {
     case 'CreateQueue': {
       const name = payload.QueueName;
@@ -135,6 +146,7 @@ function handleJsonProtocol(req, res, action, payload) {
           type: name.endsWith('.fifo') ? 'fifo' : 'standard',
           attributes: payload.Attributes || {}, messages: [], created: Date.now(),
         };
+        store.addTrail({ method: 'POST', path: `/sqs/CreateQueue/${name}`, status: 200, latency: 2 });
       }
       return jsonResponse(res, 200, { QueueUrl: url });
     }
@@ -174,7 +186,9 @@ function handleJsonProtocol(req, res, action, payload) {
       return jsonResponse(res, 200, { QueueUrls: Object.keys(store.sqs.queues) });
     }
     case 'DeleteQueue': {
+      const qName = store.sqs.queues[payload.QueueUrl]?.name || payload.QueueUrl.split('/').pop();
       delete store.sqs.queues[payload.QueueUrl];
+      store.addTrail({ method: 'POST', path: `/sqs/DeleteQueue/${qName}`, status: 200, latency: 1 });
       return jsonResponse(res, 200, {});
     }
     case 'PurgeQueue': {
@@ -189,9 +203,44 @@ function handleJsonProtocol(req, res, action, payload) {
       const url = payload.QueueUrl;
       const q = store.sqs.queues[url];
       if (!q) return jsonResponse(res, 400, { __type: 'QueueDoesNotExist', message: 'Queue not found' });
+      if (q.type === 'fifo' && !payload.MessageGroupId) {
+        return jsonResponse(res, 400, { __type: 'MissingParameter', message: 'The request must contain the parameter MessageGroupId.' });
+      }
       const msgBody = payload.MessageBody || '';
-      const msg = enqueueMessage(url, msgBody, { dedupeId: payload.MessageDeduplicationId });
-      return jsonResponse(res, 200, { MessageId: msg.id, MD5OfMessageBody: md5(msgBody) });
+      const msg = enqueueMessage(url, msgBody, {
+        dedupeId: payload.MessageDeduplicationId,
+        groupId: payload.MessageGroupId,
+        delaySeconds: payload.DelaySeconds,
+        attributes: payload.MessageAttributes,
+      });
+      const out = { MessageId: msg.id, MD5OfMessageBody: md5(msgBody) };
+      if (hasAttributes(payload.MessageAttributes)) out.MD5OfMessageAttributes = md5OfMessageAttributes(payload.MessageAttributes);
+      if (q.type === 'fifo') out.SequenceNumber = msg.sequenceNumber;
+      return jsonResponse(res, 200, out);
+    }
+    case 'SendMessageBatch': {
+      const url = payload.QueueUrl;
+      const q = store.sqs.queues[url];
+      if (!q) return jsonResponse(res, 400, { __type: 'QueueDoesNotExist', message: 'Queue not found' });
+      const Successful = [], Failed = [];
+      for (const e of payload.Entries || []) {
+        if (q.type === 'fifo' && !e.MessageGroupId) {
+          Failed.push({ Id: e.Id, Code: 'MissingParameter', Message: 'The request must contain the parameter MessageGroupId.', SenderFault: true });
+          continue;
+        }
+        const body = e.MessageBody || '';
+        const msg = enqueueMessage(url, body, {
+          dedupeId: e.MessageDeduplicationId,
+          groupId: e.MessageGroupId,
+          delaySeconds: e.DelaySeconds,
+          attributes: e.MessageAttributes,
+        });
+        const entry = { Id: e.Id, MessageId: msg.id, MD5OfMessageBody: md5(body) };
+        if (hasAttributes(e.MessageAttributes)) entry.MD5OfMessageAttributes = md5OfMessageAttributes(e.MessageAttributes);
+        if (q.type === 'fifo') entry.SequenceNumber = msg.sequenceNumber;
+        Successful.push(entry);
+      }
+      return jsonResponse(res, 200, { Successful, Failed });
     }
     case 'ReceiveMessage': {
       const url = payload.QueueUrl;
@@ -199,16 +248,75 @@ function handleJsonProtocol(req, res, action, payload) {
       if (!q) return jsonResponse(res, 400, { __type: 'QueueDoesNotExist', message: 'Queue not found' });
       const maxMsgs = payload.MaxNumberOfMessages || 1;
       const visMs = (payload.VisibilityTimeout ?? 30) * 1000;
-      const msgs = q.messages.filter(m => m.visible).slice(0, maxMsgs);
+      // Long polling: wait up to WaitTimeSeconds (cap 20s) for a message to
+      // appear, polling on a short unref'd timer. Falls back to the queue's
+      // ReceiveMessageWaitTimeSeconds attribute. Bails if the queue is deleted.
+      const waitSec = Math.min(payload.WaitTimeSeconds ?? (Number(q.attributes?.ReceiveMessageWaitTimeSeconds) || 0), 20);
+      let msgs = selectMessages(q, maxMsgs);
+      if (waitSec > 0 && msgs.length === 0) {
+        const deadline = Date.now() + waitSec * 1000;
+        while (msgs.length === 0 && Date.now() < deadline) {
+          await new Promise(r => { const t = setTimeout(r, 50); t.unref?.(); });
+          const qNow = store.sqs.queues[url];
+          if (!qNow) break;
+          msgs = selectMessages(qNow, maxMsgs);
+        }
+      }
       msgs.forEach(m => hideMessage(m, visMs));
       return jsonResponse(res, 200, {
-        Messages: msgs.map(m => ({ MessageId: m.id, ReceiptHandle: m.receiptHandle, Body: m.body, MD5OfBody: md5(m.body) }))
+        Messages: msgs.map(m => {
+          const out = {
+            MessageId: m.id, ReceiptHandle: m.receiptHandle, Body: m.body, MD5OfBody: md5(m.body),
+            Attributes: {
+              ApproximateReceiveCount: String(m.approxReceiveCount || 1),
+              SentTimestamp: String(m.sent),
+              ...(q.type === 'fifo' ? { MessageGroupId: m.groupId, SequenceNumber: m.sequenceNumber, ...(m.dedupeId ? { MessageDeduplicationId: m.dedupeId } : {}) } : {}),
+            },
+          };
+          if (hasAttributes(m.messageAttributes)) {
+            out.MessageAttributes = m.messageAttributes;
+            out.MD5OfMessageAttributes = md5OfMessageAttributes(m.messageAttributes);
+          }
+          return out;
+        })
       });
     }
     case 'DeleteMessage': {
       const q = store.sqs.queues[payload.QueueUrl];
       if (q) q.messages = removeAndCancel(q.messages, m => m.receiptHandle === payload.ReceiptHandle);
       return jsonResponse(res, 200, {});
+    }
+    case 'DeleteMessageBatch': {
+      const q = store.sqs.queues[payload.QueueUrl];
+      if (!q) return jsonResponse(res, 400, { __type: 'QueueDoesNotExist', message: 'Queue not found' });
+      const Successful = [], Failed = [];
+      for (const e of payload.Entries || []) {
+        const before = q.messages.length;
+        q.messages = removeAndCancel(q.messages, m => m.receiptHandle === e.ReceiptHandle);
+        if (q.messages.length < before) Successful.push({ Id: e.Id });
+        else Failed.push({ Id: e.Id, Code: 'ReceiptHandleIsInvalid', Message: 'The receipt handle does not match any message.', SenderFault: true });
+      }
+      return jsonResponse(res, 200, { Successful, Failed });
+    }
+    case 'ChangeMessageVisibility': {
+      const q = store.sqs.queues[payload.QueueUrl];
+      if (!q) return jsonResponse(res, 400, { __type: 'QueueDoesNotExist', message: 'Queue not found' });
+      const m = q.messages.find(m => m.receiptHandle === payload.ReceiptHandle);
+      if (!m) return jsonResponse(res, 400, { __type: 'ReceiptHandleIsInvalid', message: 'The receipt handle does not match any message.' });
+      setInvisible(m, (payload.VisibilityTimeout ?? 30) * 1000);
+      return jsonResponse(res, 200, {});
+    }
+    case 'ChangeMessageVisibilityBatch': {
+      const q = store.sqs.queues[payload.QueueUrl];
+      if (!q) return jsonResponse(res, 400, { __type: 'QueueDoesNotExist', message: 'Queue not found' });
+      const Successful = [], Failed = [];
+      for (const e of payload.Entries || []) {
+        const m = q.messages.find(m => m.receiptHandle === e.ReceiptHandle);
+        if (!m) { Failed.push({ Id: e.Id, Code: 'ReceiptHandleIsInvalid', Message: 'The receipt handle does not match any message.', SenderFault: true }); continue; }
+        setInvisible(m, (e.VisibilityTimeout ?? 30) * 1000);
+        Successful.push({ Id: e.Id });
+      }
+      return jsonResponse(res, 200, { Successful, Failed });
     }
     default:
       return jsonResponse(res, 400, { __type: 'InvalidAction', message: `Unknown SQS action: ${action}` });
@@ -220,16 +328,59 @@ function handleJsonProtocol(req, res, action, payload) {
 export function enqueueMessage(queueUrl, body, opts = {}) {
   const q = store.sqs.queues[queueUrl];
   if (!q) throw new Error(`Queue not found: ${queueUrl}`);
+  const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
   const msg = {
     id:            randomId(36),
     receiptHandle: randomId(64),
-    body:          typeof body === 'string' ? body : JSON.stringify(body),
+    body:          bodyStr,
     sent:          Date.now(),
     visible:       true,
     dedupeId:      opts.dedupeId || null,
+    approxReceiveCount: 0,
+    messageAttributes: opts.attributes || null,
   };
+
+  if (q.type === 'fifo') {
+    // Deduplication (5-min window): explicit MessageDeduplicationId, or a
+    // content hash when ContentBasedDeduplication is enabled. A duplicate is a
+    // no-op that returns the original message (same id + sequence number).
+    const dedupeKey = opts.dedupeId ||
+      (q.attributes?.ContentBasedDeduplication === 'true' ? md5(bodyStr) : null);
+    if (dedupeKey) {
+      if (!q.dedupe) q.dedupe = new Map();
+      const now = Date.now();
+      for (const [k, v] of q.dedupe) if (now - v.t > 300_000) q.dedupe.delete(k);
+      const hit = q.dedupe.get(dedupeKey);
+      if (hit) return hit.msg;
+      q.dedupe.set(dedupeKey, { msg, t: Date.now() });
+    }
+    q.seq = (q.seq || 0) + 1;
+    msg.groupId        = opts.groupId || 'mockcloud-default';
+    msg.sequenceNumber = String(q.seq).padStart(20, '0');
+  }
+
   q.messages.push(msg);
+  if (opts.delaySeconds > 0) setInvisible(msg, opts.delaySeconds * 1000);   // DelaySeconds
   return msg;
+}
+
+// Pick the messages a ReceiveMessage returns. Standard queues: the earliest
+// visible messages. FIFO: in sequence order, at most one per message group,
+// skipping any group with an in-flight (not-visible) message — preserving
+// per-group ordering while allowing parallelism across groups.
+export function selectMessages(q, maxMsgs) {
+  applyRedrive(q);
+  if (q.type !== 'fifo') return q.messages.filter(m => m.visible).slice(0, maxMsgs);
+  const locked = new Set(q.messages.filter(m => !m.visible).map(m => m.groupId));
+  const chosen = [];
+  const used = new Set();
+  for (const m of q.messages) {
+    if (chosen.length >= maxMsgs) break;
+    if (!m.visible || locked.has(m.groupId) || used.has(m.groupId)) continue;
+    chosen.push(m);
+    used.add(m.groupId);
+  }
+  return chosen;
 }
 
 // Convenience: resolve an SQS ARN to its queue URL.
@@ -244,29 +395,61 @@ function queueUrlFor(name) {
   return `http://localhost:4566/${ACCOUNT}/${name}`;
 }
 
+// Dead-letter redrive: when a message has been received >= maxReceiveCount times
+// (per the queue's RedrivePolicy) move it to the DLQ instead of re-delivering.
+// Evaluated at receive time (via selectMessages).
+function parseRedrive(q) {
+  try {
+    const p = JSON.parse(q.attributes?.RedrivePolicy || '');
+    if (p && p.deadLetterTargetArn && p.maxReceiveCount) return { arn: p.deadLetterTargetArn, max: Number(p.maxReceiveCount) };
+  } catch {}
+  return null;
+}
+
+function applyRedrive(q) {
+  const rd = parseRedrive(q);
+  if (!rd) return;
+  const dlqUrl = queueUrlForArn(rd.arn);
+  if (!dlqUrl || !store.sqs.queues[dlqUrl]) return;
+  const survivors = [];
+  for (const m of q.messages) {
+    if ((m.approxReceiveCount || 0) >= rd.max) {
+      cancelVisibilityTimer(m);
+      enqueueMessage(dlqUrl, m.body, { groupId: m.groupId });
+    } else survivors.push(m);
+  }
+  q.messages = survivors;
+}
+
 // Hide a message and schedule its visibility to be restored after `ms`. We
 // store the timer on the message so DeleteMessage / PurgeQueue can cancel it.
 // Without cancellation the closure used to silently re-mark a deleted message
 // as visible (harmless if the queue was deleted, but it kept node alive in
 // tests and made invariants fuzzy).
-function hideMessage(m, ms) {
-  m.visible = false;
+// Re-arm a message's visibility timer without touching its receive count
+// (used by ChangeMessageVisibility and DelaySeconds). ms<=0 → visible now.
+function setInvisible(m, ms) {
   cancelVisibilityTimer(m);
-  m._visTimer = setTimeout(() => {
-    m.visible = true;
-    m._visTimer = null;
-  }, ms);
+  if (ms <= 0) { m.visible = true; return; }
+  m.visible = false;
+  m._visTimer = setTimeout(() => { m.visible = true; m._visTimer = null; }, ms);
   m._visTimer.unref?.();
 }
 
-function cancelVisibilityTimer(m) {
+// Deliver a message: bump the receive count, then hide it for the visibility window.
+export function hideMessage(m, ms) {
+  m.approxReceiveCount = (m.approxReceiveCount || 0) + 1;
+  setInvisible(m, ms);
+}
+
+export function cancelVisibilityTimer(m) {
   if (m && m._visTimer) {
     clearTimeout(m._visTimer);
     m._visTimer = null;
   }
 }
 
-function removeAndCancel(messages, predicate) {
+export function removeAndCancel(messages, predicate) {
   const kept = [];
   for (const m of messages) {
     if (predicate(m)) cancelVisibilityTimer(m);
@@ -277,6 +460,31 @@ function removeAndCancel(messages, predicate) {
 
 function md5(str) {
   return crypto.createHash('md5').update(String(str)).digest('hex');
+}
+
+function hasAttributes(attrs) {
+  return attrs && typeof attrs === 'object' && Object.keys(attrs).length > 0;
+}
+
+// AWS-canonical MD5 of message attributes: sorted names, each field length-
+// prefixed (4-byte BE), value tagged String(1)/Binary(2).
+function md5OfMessageAttributes(attrs) {
+  const enc = v => { const b = Buffer.from(String(v), 'utf8'); const len = Buffer.alloc(4); len.writeUInt32BE(b.length); return Buffer.concat([len, b]); };
+  const parts = [];
+  for (const name of Object.keys(attrs).sort()) {
+    const a = attrs[name];
+    const dataType = a.DataType || a.dataType || 'String';
+    parts.push(enc(name), enc(dataType));
+    const binary = a.BinaryValue ?? a.binaryValue;
+    if (binary != null) {
+      const bin = Buffer.isBuffer(binary) ? binary : Buffer.from(binary);
+      const len = Buffer.alloc(4); len.writeUInt32BE(bin.length);
+      parts.push(Buffer.from([2]), len, bin);
+    } else {
+      parts.push(Buffer.from([1]), enc(a.StringValue ?? a.stringValue ?? ''));
+    }
+  }
+  return crypto.createHash('md5').update(Buffer.concat(parts)).digest('hex');
 }
 
 function sqsWrap(respTag, resultTag, inner) {

@@ -123,3 +123,78 @@ function listIdentitiesForm(req, res) {
 function getSendQuotaForm(req, res) {
   xmlResponse(res, 200, `<?xml version="1.0"?><GetSendQuotaResponse><GetSendQuotaResult><Max24HourSend>50000</Max24HourSend><MaxSendRate>14</MaxSendRate><SentLast24Hours>${store.ses.sent}</SentLast24Hours></GetSendQuotaResult></GetSendQuotaResponse>`);
 }
+
+// ── Inbound receipt rules (control-plane driven) ────────────────────────────
+// A local mock can't receive real SMTP, so inbound mail is simulated via the
+// control plane (POST /mockcloud/ses/inbound). For each enabled receipt rule
+// whose recipients match, run its actions — reusing the S3 / SNS / Lambda
+// delivery paths so an inbound email can land an object, fan out a
+// notification, or invoke a function, exactly like real SES receipt rules.
+//   rule:   { name, enabled?, recipients: [addr|domain], actions: [Action] }
+//   Action: { type:'s3', bucket, objectKeyPrefix? }
+//         | { type:'sns', topicArn }
+//         | { type:'lambda', functionArn }
+export async function deliverInboundEmail({ from, to, subject, body } = {}) {
+  const recipients = (Array.isArray(to) ? to : [to]).filter(Boolean);
+  const messageId  = randomId(36);
+  const rawEmail   = `From: ${from || ''}\r\nTo: ${recipients.join(', ')}\r\nSubject: ${subject || ''}\r\n\r\n${body || ''}`;
+
+  const matched = [];
+  for (const rule of store.ses.receiptRules || []) {
+    if (rule.enabled === false) continue;
+    if (!recipientMatches(rule.recipients, recipients)) continue;
+    matched.push(rule.name);
+    for (const action of rule.actions || []) {
+      try { await runReceiptAction(action, { messageId, from, recipients, subject, rawEmail }); }
+      catch (e) { console.warn(`[SES] receipt action ${action?.type} failed:`, e.message); }
+    }
+  }
+  // Record the inbound message in the same log the UI lists outbound from.
+  store.ses.emails.unshift({ messageId, direction: 'inbound', from, to: recipients, subject: subject || '(no subject)', body: body || '', matchedRules: matched, sent: Date.now() });
+  if (store.ses.emails.length > 500) store.ses.emails.pop();
+  return { messageId, matched };
+}
+
+// Empty/absent recipient list on a rule matches everything. Otherwise match a
+// full address, a domain (`example.com`), or an address ending in `@domain`.
+function recipientMatches(ruleRecipients, recipients) {
+  if (!ruleRecipients || ruleRecipients.length === 0) return true;
+  return recipients.some(addr =>
+    ruleRecipients.some(r => addr === r || addr.endsWith('@' + r) || addr.endsWith(r)));
+}
+
+async function runReceiptAction(action, ctx) {
+  switch ((action.type || '').toLowerCase()) {
+    case 's3': {
+      const { putObjectToBucket } = await import('./s3.js');
+      const key = `${action.objectKeyPrefix || ''}${ctx.messageId}`;
+      putObjectToBucket(action.bucket, key, Buffer.from(ctx.rawEmail), 'message/rfc822');
+      return;
+    }
+    case 'sns': {
+      const topic = store.sns.topics[action.topicArn];
+      if (!topic) return;
+      const { fanoutSnsMessage } = await import('./sns.js');
+      topic.published = (topic.published || 0) + 1;
+      const notification = JSON.stringify({
+        notificationType: 'Received',
+        mail: { messageId: ctx.messageId, source: ctx.from, destination: ctx.recipients, commonHeaders: { subject: ctx.subject } },
+      });
+      await fanoutSnsMessage(topic, { msgId: randomId(36), message: notification, subject: 'Amazon SES Email Receipt Notification' });
+      return;
+    }
+    case 'lambda': {
+      const { invokeLambda } = await import('./lambda.js');
+      const fnName = action.functionArn.split(':').pop();
+      const event = { Records: [{
+        eventSource: 'aws:ses', eventVersion: '1.0',
+        ses: {
+          mail: { messageId: ctx.messageId, source: ctx.from, destination: ctx.recipients, commonHeaders: { subject: ctx.subject, from: [ctx.from], to: ctx.recipients } },
+          receipt: { recipients: ctx.recipients, action: { type: 'Lambda', functionArn: action.functionArn } },
+        },
+      }] };
+      invokeLambda(fnName, event, { source: 'ses' }).catch(() => {});
+      return;
+    }
+  }
+}

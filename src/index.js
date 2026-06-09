@@ -4,10 +4,13 @@ import { readFileSync, existsSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import { store } from './store.js';
 import { Router } from './router.js';
 import { dispatchAWS } from './dispatcher.js';
 import { registerAllRoutes } from './routes/index.js';
+import { sendInternalError } from './middleware/response.js';
+import { sigv4Enabled, verifySigV4, sendSigV4Error } from './middleware/sigv4.js';
+import { iamMode, enforceIam, sendIamError } from './iam/policy-eval.js';
+import { startBackground, stopBackground } from './lifecycle.js';
 import { VERSION } from './version.js';
 import { applyCors, attachBody, safeJoin } from './middleware/http.js';
 
@@ -22,23 +25,8 @@ export { VERSION };
 const PORT = parseInt(process.env.PORT || '4566');
 const UI_PORT = parseInt(process.env.UI_PORT || '4567');
 const HOST = process.env.HOST || '127.0.0.1';
-
-// Parse --ec2=lite|vmm CLI flag  (node src/index.js --ec2=lite)
-// Parse --ec2=simulated|docker (primary) or --ec2=lite|vmm (legacy aliases).
-// Final mode is decided after the daemon starts so we can ping Docker; see
-// the resolveEc2Mode call in the awsServer.listen callback below.
-const ec2Flag = (process.argv.find(a => a.startsWith('--ec2=')) || '').split('=')[1];
-const EC2_FLAG_MAP = {
-  simulated: 'lite',
-  docker: 'vmm',
-  lite: 'lite',
-  vmm: 'vmm',
-};
-const ec2Requested = ec2Flag ? EC2_FLAG_MAP[ec2Flag.toLowerCase()] : null;
-if (ec2Flag && !ec2Requested) {
-  console.error(`\n  ✗ Unknown --ec2 value: "${ec2Flag}". Use simulated|docker (or legacy lite|vmm).\n`);
-  process.exit(1);
-}
+// Headless mode: skip the dashboard server (CI / API-only callers don't need it).
+const UI_ENABLED = !['true', '1', 'yes'].includes((process.env.MOCKCLOUD_DISABLE_UI || '').toLowerCase());
 
 // ── Internal UI router ─────────────────────────────────────────────────────
 const apiRouter = new Router();
@@ -48,11 +36,31 @@ registerAllRoutes(apiRouter);
 // CORS, body parsing, and the cross-origin gate all live in the shared
 // middleware/http.js so tests/helpers/server.js can use the exact same path.
 const awsServer = http.createServer(async (req, res) => {
+  // Shared CORS + cross-origin gate + body parsing (middleware/http.js).
   if (!applyCors(req, res)) return;
   await attachBody(req);
 
-  const matched = await apiRouter.dispatch(req, res);
-  if (!matched) await dispatchAWS(req, res);
+  // Try internal UI routes first, then AWS dispatch. A top-level boundary turns
+  // any unhandled handler error into a proper AWS error shape instead of a hung
+  // socket (which breaks SDK retry/timeout behaviour).
+  try {
+    const matched = await apiRouter.dispatch(req, res);
+    if (!matched) {
+      // Opt-in SigV4 verification (off by default). /mockcloud routes are
+      // internal and exempt — they're handled by the router above.
+      if (sigv4Enabled()) {
+        const authErr = verifySigV4(req);
+        if (authErr) return sendSigV4Error(req, res, authErr);
+      }
+      if (iamMode() !== 'off') {
+        const iamErr = enforceIam(req);
+        if (iamErr) return sendIamError(req, res, iamErr);
+      }
+      await dispatchAWS(req, res);
+    }
+  } catch (err) {
+    sendInternalError(req, res, err);
+  }
 });
 
 // ── UI server (port 4567) ──────────────────────────────────────────────────
@@ -94,59 +102,22 @@ const uiServer = http.createServer((req, res) => {
 });
 
 // ── Start ──────────────────────────────────────────────────────────────────
-awsServer.listen(PORT, HOST, async () => {
+awsServer.listen(PORT, HOST, () => {
   console.log(`\n  ╭─────────────────────────────────────────────────╮`);
   console.log(`  │   ☁  MockCloud  v${VERSION.padEnd(30)}│`);
   console.log(`  │   AWS API  →  http://${HOST}:${PORT}             │`);
-  console.log(`  │   Console  →  http://${HOST}:${UI_PORT}             │`);
+  if (UI_ENABLED) console.log(`  │   Console  →  http://${HOST}:${UI_PORT}             │`);
   console.log(`  │   github.com/mockcloud/mockcloud                │`);
   console.log(`  ╰─────────────────────────────────────────────────╯\n`);
-
-  // Resolve EC2 execution mode now that we can ping Docker.
-  // Rules:
-  //   - explicit --ec2=docker  → require Docker, hard-fail with hint if down
-  //   - explicit --ec2=simulated → use simulated, skip Docker check entirely
-  //   - no flag                → auto-detect: docker if up, else simulated
-  const { pingDocker } = await import('./services/docker-health.js');
-
-  if (ec2Requested === 'lite') {
-    store.ec2.mode = 'lite';
-    console.log(`  EC2 mode: simulated (--ec2=simulated)\n`);
-  } else if (ec2Requested === 'vmm') {
-    const probe = await pingDocker({ force: true });
-    if (!probe.ok) {
-      console.error(`  ✗ --ec2=docker requested but Docker daemon is not reachable.`);
-      console.error(`    ${probe.hint}`);
-      if (probe.reason) console.error(`    (${probe.reason})`);
-      process.exit(1);
-    }
-    store.ec2.mode = 'vmm';
-    console.log(`  EC2 mode: docker (--ec2=docker, daemon reachable)\n`);
-  } else {
-    const probe = await pingDocker({ force: true });
-    if (probe.ok) {
-      store.ec2.mode = 'vmm';
-      console.log(`  EC2 mode: docker (auto-detected; Docker daemon is up)\n`);
-    } else {
-      store.ec2.mode = 'lite';
-      console.log(`  EC2 mode: simulated (Docker not detected — pass --ec2=docker to force)\n`);
-    }
-  }
-
-  // Reconcile any Docker EC2 containers that survived a restart.
-  // Only meaningful in vmm mode; harmless in lite mode (just no-ops).
-  if (store.ec2.mode === 'vmm') {
-    try {
-      const { reconcileDockerInstances } = await import('./services/docker.js');
-      await reconcileDockerInstances(store);
-    } catch { }
-  }
 });
 
-uiServer.listen(UI_PORT, HOST);
+if (UI_ENABLED) uiServer.listen(UI_PORT, HOST);
 
-process.on('SIGTERM', () => { awsServer.close(); uiServer.close(); process.exit(0); });
-process.on('SIGINT', () => { awsServer.close(); uiServer.close(); process.exit(0); });
+// Background pollers / schedulers (SQS→Lambda, EventBridge schedules, …).
+startBackground();
+
+process.on('SIGTERM', () => { stopBackground(); awsServer.close(); if (UI_ENABLED) uiServer.close(); process.exit(0); });
+process.on('SIGINT',  () => { stopBackground(); awsServer.close(); if (UI_ENABLED) uiServer.close(); process.exit(0); });
 
 // Belt-and-braces: log async throws / unhandled rejections from request
 // handling but don't let them terminate the daemon. The router already wraps

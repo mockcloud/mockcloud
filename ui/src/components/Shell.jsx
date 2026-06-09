@@ -59,13 +59,11 @@ function SettingsModal({ onClose, pushToast }) {
   async function doReset() {
     setBusy(true);
     try {
-      const r = await api.reset();
+      await api.reset();
       pushToast?.({
         kind: 'success',
         title: 'All resources reset',
-        body: r?.dockerTerminated
-          ? `Cleared store · ${r.dockerTerminated} Docker container(s) terminated`
-          : 'Cleared store',
+        body: 'Cleared store',
       });
       onClose();
     } catch (e) {
@@ -135,13 +133,6 @@ const NAV = [
   { section:'Security', items: [
     { id:'secrets', label:'Secrets Manager', icon: Icons.IconSecrets },
     { id:'iam',     label:'IAM',             icon: Icons.IconIAM },
-    { id:'kms',     label:'KMS',             icon: Icons.IconSecrets },
-    { id:'cognito', label:'Cognito',         icon: Icons.IconIAM },
-  ]},
-  { section:'Developer', items: [
-    { id:'ssm',   label:'SSM Parameters', icon: Icons.IconFile },
-    { id:'ses',   label:'SES (Email)',     icon: Icons.IconCloud },
-    { id:'sfn',   label:'Step Functions', icon: Icons.IconSparkles },
   ]},
   { section:'Management', items: [
     { id:'watch',    label:'CloudWatch',  icon: Icons.IconWatch },

@@ -51,4 +51,26 @@ export function registerIAMRoutes(app) {
     store.addTrail({ method: 'DELETE', path: `/iam/roles/${req.params.name}`, status: 200, latency: 1 });
     jsonResponse(res, 200, { deleted: req.params.name });
   });
+
+  // ── Identity policies (for opt-in MOCKCLOUD_IAM evaluation) ───────────────
+  app.get('/mockcloud/iam/identity-policies', (req, res) => {
+    jsonResponse(res, 200, { identityPolicies: store.iam.identityPolicies });
+  });
+
+  // Attach a policy document to a principal: { principal, policy }.
+  // `policy` is an IAM policy document (object or JSON string).
+  app.post('/mockcloud/iam/identity-policies', (req, res) => {
+    const { principal, policy } = body(req);
+    if (!principal || !policy) return errorJson(res, 400, 'ValidationError', 'principal and policy required');
+    (store.iam.identityPolicies[principal] ||= []).push(policy);
+    jsonResponse(res, 201, { principal, count: store.iam.identityPolicies[principal].length });
+  });
+
+  // Clear all identity policies (or just one principal's via ?principal=).
+  app.delete('/mockcloud/iam/identity-policies', (req, res) => {
+    const principal = req.query?.principal;
+    if (principal) delete store.iam.identityPolicies[principal];
+    else store.iam.identityPolicies = {};
+    jsonResponse(res, 200, { cleared: principal || 'all' });
+  });
 }

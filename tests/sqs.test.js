@@ -3,7 +3,7 @@
 //   - form-encoded (AWS SDK v2 / classic CLI)
 //   - JSON with X-Amz-Target: AmazonSQS.<Op> (AWS SDK v3 / Terraform v5+)
 
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { describe, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import assert from 'node:assert/strict';
 import { startServer } from './helpers/server.js';
 import { awsForm, awsJson, xmlValue } from './helpers/http.js';
@@ -12,8 +12,8 @@ let server;
 const sqsForm = (action, params) => awsForm(server.endpoint, action, params, { version: '2012-11-05' });
 const sqsJson = (op, payload) => awsJson(server.endpoint, `AmazonSQS.${op}`, payload);
 
-before(async () => { server = await startServer(); });
-after(() => server.close());
+beforeAll(async () => { server = await startServer(); });
+afterAll(() => server.close());
 beforeEach(() => server.resetStore());
 
 describe('SQS form-encoded protocol', () => {

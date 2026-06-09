@@ -8,8 +8,8 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "reset": "node scripts/reset.js",
-    "test": "node --test tests/ec2.test.js tests/s3.test.js tests/apigatewayv2.test.js tests/dynamodb.test.js tests/sqs.test.js tests/sns.test.js tests/lambda.test.js tests/kms.test.js tests/ssm.test.js tests/store.test.js tests/security.test.js",
-    "test:watch": "node --test --watch tests/*.test.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "ui:dev": "cd ui && npm run dev",
     "ui:build": "cd ui && npm run build"
   },
@@ -40,9 +40,15 @@
     "offline"
   ],
   "devDependencies": {
-    "@aws-sdk/client-api-gateway": "^3.1045.0",
-    "@aws-sdk/client-apigatewayv2": "^3.1045.0",
+    "@aws-sdk/client-cloudwatch": "^3.1045.0",
+    "@aws-sdk/client-cloudwatch-logs": "^3.1045.0",
+    "@aws-sdk/client-dynamodb": "^3.1045.0",
     "@aws-sdk/client-ec2": "^3.1045.0",
-    "@aws-sdk/client-s3": "^3.1045.0"
+    "@aws-sdk/client-lambda": "^3.1045.0",
+    "@aws-sdk/client-s3": "^3.1045.0",
+    "@aws-sdk/client-sns": "^3.1045.0",
+    "@aws-sdk/client-sqs": "^3.1045.0",
+    "@aws-sdk/s3-request-presigner": "^3.1045.0",
+    "vitest": "^3.0.0"
   }
 }

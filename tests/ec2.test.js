@@ -1,5 +1,5 @@
 // tests/ec2.test.js
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { describe, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import assert from 'node:assert/strict';
 import {
   CreateSecurityGroupCommand,
@@ -21,12 +21,12 @@ import { makeClients } from './helpers/aws.js';
 
 let server, ec2;
 
-before(async () => {
+beforeAll(async () => {
   server = await startServer();
   ({ ec2 } = makeClients(server.endpoint));
 });
 
-after(() => server.close());
+afterAll(() => server.close());
 beforeEach(() => server.resetStore());
 
 // ── Security Groups ──────────────────────────────────────────────────────────

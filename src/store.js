@@ -13,20 +13,22 @@ const INITIAL_STATE = {
   s3:              () => ({ buckets: {} }),
   dynamodb:        () => ({ tables: {} }),
   lambda:          () => ({ functions: {} }),
-  iam:             () => ({ users: {}, roles: {}, policies: {} }),
+  // accessKeys maps accessKeyId → secretAccessKey for opt-in SigV4 verification
+  // (MOCKCLOUD_VERIFY_SIGV4). Seeded with the dummy creds the CLI/SDKs use
+  // locally; CreateAccessKey adds more. identityPolicies maps a principal
+  // (username) → [policy documents] for opt-in IAM evaluation (MOCKCLOUD_IAM).
+  iam:             () => ({ users: {}, roles: {}, policies: {}, accessKeys: { local: 'local', test: 'test' }, identityPolicies: {} }),
   sns:             () => ({ topics: {} }),
   sqs:             () => ({ queues: {} }),
   secretsmanager:  () => ({ secrets: {} }),
-  ec2:             () => ({ instances: {}, keyPairs: {}, securityGroups: {}, mode: 'vmm' }),
-  apigateway:      () => ({ restApis: {}, v2: { apis: {} } }),
-  kms:             () => ({ keys: {} }),
-  ssm:             () => ({ parameters: {} }),
+  ec2:             () => ({ instances: {}, keyPairs: {}, securityGroups: {} }),
   eventbridge:     () => ({ buses: { default: { name: 'default', rules: {} } }, events: [] }),
   dynamodbstreams: () => ({ shards: {}, triggers: {} }),
   cloudwatch:      () => ({ metrics: {}, alarms: {}, maxPoints: 1440 }),
-  ses:             () => ({ emails: [], identities: {}, sent: 0 }),
+  logs:            () => ({ groups: {} }),
+  bedrock:         () => ({ defaultResponse: 'This is a canned MockCloud Bedrock response.', rules: [], invocations: [] }),
   stepfunctions:   () => ({ stateMachines: {}, executions: {} }),
-  cognito:         () => ({ userPools: {} }),
+  ses:             () => ({ emails: [], identities: {}, sent: 0, receiptRules: [] }),
 };
 
 const SERVICE_KEYS = Object.keys(INITIAL_STATE);
@@ -44,9 +46,9 @@ export const store = {
 
   // Reset a single service to its initial state, or everything if no
   // service is given. Re-applying the factory preserves all default
-  // config that lives on the namespace (e.g. ec2.mode='vmm',
-  // cloudwatch.maxPoints=1440, the default eventbridge bus) instead of
-  // blindly typing each key by typeof — which was the v1.2.0 bug.
+  // config that lives on the namespace (e.g. cloudwatch.maxPoints=1440,
+  // the default eventbridge bus) instead of blindly typing each key by
+  // typeof — which was the v1.2.0 bug.
   reset(service) {
     if (service) {
       if (INITIAL_STATE[service]) this[service] = INITIAL_STATE[service]();
@@ -66,6 +68,32 @@ export const store = {
     if (!this.cloudwatch.metrics[key]) this.cloudwatch.metrics[key] = [];
     this.cloudwatch.metrics[key].push({ t: Date.now(), v: value, unit });
     if (this.cloudwatch.metrics[key].length > this.cloudwatch.maxPoints) this.cloudwatch.metrics[key].shift();
+  },
+
+  // Record a DynamoDB data-plane operation against a table. Maintains
+  // cumulative per-table counters (for stat cards) AND pushes an
+  // activity-driven point into the CloudWatch ring buffer (for the charts),
+  // so the UI metrics reflect REAL traffic instead of canned arrays.
+  //   kind:    'read' | 'write'
+  //   units:   consumed capacity units for this op (RCU/WCU)
+  //   latency: synthetic-but-plausible request latency in ms
+  recordDynamoOp(tableName, kind, units = 1, latency = null) {
+    const t = this.dynamodb.tables[tableName];
+    if (!t) return;
+    if (!t.metrics) {
+      t.metrics = { reads: 0, writes: 0, consumedRead: 0, consumedWrite: 0, latencySum: 0, latencyCount: 0 };
+    }
+    const lat = latency == null
+      ? +((kind === 'write' ? 2 : 1) + Math.random() * 3).toFixed(2)
+      : latency;
+    if (kind === 'read')  { t.metrics.reads++;  t.metrics.consumedRead  += units; }
+    if (kind === 'write') { t.metrics.writes++; t.metrics.consumedWrite += units; }
+    t.metrics.latencySum += lat;
+    t.metrics.latencyCount++;
+
+    const capName = kind === 'write' ? 'ConsumedWriteCapacityUnits' : 'ConsumedReadCapacityUnits';
+    this.putMetric('MockCloud/DynamoDB', `${capName}/${tableName}`, units);
+    this.putMetric('MockCloud/DynamoDB', `SuccessfulRequestLatency/${tableName}`, lat, 'Milliseconds');
   },
 
   // Full snapshot — every registered service plus the trail. Lambda
@@ -127,7 +155,6 @@ const metricsTimer = setInterval(() => {
     store.putMetric('MockCloud/SQS', 'NumberOfMessagesSent', Object.values(store.sqs.queues).reduce((s,q)=>s+(q.messages?.length||0),0));
     store.putMetric('MockCloud/DynamoDB', 'SuccessfulRequestLatency', Math.random()*5+1);
     store.putMetric('MockCloud/EC2', 'RunningInstances', Object.values(store.ec2.instances).filter(i=>i.state==='running').length);
-    store.putMetric('MockCloud/SES', 'EmailsSent', num(store.ses.sent));
   } catch (e) {
     console.warn('[CloudWatch collector] tick failed:', e.message);
   }

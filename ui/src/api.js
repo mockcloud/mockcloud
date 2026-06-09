@@ -59,6 +59,10 @@ export const api = {
     delete: (n) => del(`/dynamodb/tables/${n}`),
     putItem: (t, i) => post(`/dynamodb/tables/${t}/items`, i),
     deleteItem: (t, pk) => del(`/dynamodb/tables/${t}/items/${encodeURIComponent(pk)}`),
+    createIndex: (t, b) => post(`/dynamodb/tables/${t}/indexes`, b),
+    deleteIndex: (t, ix) => del(`/dynamodb/tables/${t}/indexes/${encodeURIComponent(ix)}`),
+    metrics: (t) => get(`/dynamodb/tables/${t}/metrics`),
+    query: (t, b) => post(`/dynamodb/tables/${t}/query`, b),
   },
   lambda: {
     functions: () => get('/lambda/functions'),
@@ -73,8 +77,6 @@ export const api = {
     launch: (b) => post('/ec2/instances', b),
     action: (id, a) => post(`/ec2/instances/${id}/action`, { action: a }),
     terminate: (id) => del(`/ec2/instances/${id}`),
-    setMode: (mode) => post('/ec2/mode', { mode }),
-    dockerStatus: () => get('/ec2/docker-status'),
   },
   sns: {
     topics: () => get('/sns/topics'),
@@ -106,16 +108,6 @@ export const api = {
     createRole: (b) => post('/iam/roles', b),
     deleteRole: (n) => del(`/iam/roles/${n}`),
   },
-  kms: {
-    keys: () => get('/kms/keys'),
-    create: (b) => post('/kms/keys', b),
-    delete: (id) => del(`/kms/keys/${id}`),
-  },
-  ssm: {
-    parameters: (path) => get('/ssm/parameters' + (path ? `?path=${encodeURIComponent(path)}` : '')),
-    create: (b) => post('/ssm/parameters', b),
-    delete: (n) => del(`/ssm/parameters/${encodeURIComponent(n)}`),
-  },
   eventbridge: {
     buses: () => get('/eventbridge/buses'),
     rules: (bus) => get(`/eventbridge/buses/${bus}/rules`),
@@ -127,29 +119,6 @@ export const api = {
     metrics: () => get('/cloudwatch/metrics'),
     metric: (ns, n) => get(`/cloudwatch/metrics/${ns}/${n}`),
     alarms: () => get('/cloudwatch/alarms'),
-  },
-  ses: {
-    emails: () => get('/ses/emails'),
-    clearEmails: () => del('/ses/emails'),
-    identities: () => get('/ses/identities'),
-    verifyIdentity: (e) => post('/ses/identities', { email: e }),
-    deleteIdentity: (e) => del(`/ses/identities/${encodeURIComponent(e)}`),
-  },
-  sfn: {
-    stateMachines: () => get('/sfn/statemachines'),
-    create: (b) => post('/sfn/statemachines', b),
-    delete: (n) => del(`/sfn/statemachines/${n}`),
-    executions: (n) => get(`/sfn/statemachines/${n}/executions`),
-    startExecution: (n, name, input) => post(`/sfn/statemachines/${n}/executions`, { name, input }),
-    describeExecution: (n, execName) => get(`/sfn/statemachines/${n}/executions/${encodeURIComponent(execName)}`),
-  },
-  cognito: {
-    userPools: () => get('/cognito/userpools'),
-    createPool: (n) => post('/cognito/userpools', { name: n }),
-    users: (id) => get(`/cognito/userpools/${id}/users`),
-    createUser: (id, username, email, attributes) => post(`/cognito/userpools/${id}/users`, { username, email, attributes }),
-    deleteUser: (id, username) => del(`/cognito/userpools/${id}/users/${encodeURIComponent(username)}`),
-    deletePool: (id) => del(`/cognito/userpools/${id}`),
   },
   terminal: {
     create: (t, id) => post('/terminal/sessions', { type: t, instanceId: id }),

@@ -60,3 +60,20 @@ export function escapeXml(str) {
 function randomReqId() {
   return Array.from({ length: 32 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
 }
+
+// Last-resort error boundary. Turns an unhandled handler error into a proper AWS
+// error shape — JSON `__type` for the JSON-protocol services, an S3 `<Error>`
+// document otherwise — so SDK retry logic engages instead of the client hanging
+// on a never-completed socket.
+export function sendInternalError(req, res, err) {
+  if (err) console.error('[MockCloud] Unhandled error:', err.stack || err);
+  if (res.headersSent) { try { res.end(); } catch {} return; }
+  const isJson = !!req.headers['x-amz-target'] || (req.headers['content-type'] || '').includes('json');
+  if (isJson) {
+    res.writeHead(500, { 'Content-Type': 'application/x-amz-json-1.0' });
+    res.end(JSON.stringify({ __type: 'InternalFailure', message: 'The request processing has failed because of an unknown error.' }));
+  } else {
+    res.writeHead(500, { 'Content-Type': 'application/xml' });
+    res.end('<?xml version="1.0" encoding="UTF-8"?><Error><Code>InternalError</Code><Message>We encountered an internal error. Please try again.</Message></Error>');
+  }
+}

@@ -18,7 +18,7 @@ export function IAMPage({ pushToast }) {
     try { const [u,r]=await Promise.all([api.iam.users(),api.iam.roles()]); setUsers(u.users||[]); setRoles(r.roles||[]); }
     catch(e){ pushToast({kind:'err',title:'IAM error',body:e.message}); }
   },[]);
-  useEffect(()=>{ load(); },[load]);
+  useEffect(()=>{ load(); const id=setInterval(load,3000); return ()=>clearInterval(id); },[load]);
 
   return (
     <>

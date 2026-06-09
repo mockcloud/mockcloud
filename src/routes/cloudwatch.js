@@ -64,8 +64,6 @@ export function registerCloudWatchRoutes(app) {
         ec2Running:        Object.values(store.ec2.instances).filter(i => i.state === 'running').length,
         snsTopics:         Object.keys(store.sns.topics).length,
         ebRules:           Object.values(store.eventbridge.buses).reduce((s, b) => s + Object.keys(b.rules).length, 0),
-        kmsKeys:           Object.keys(store.kms.keys).length,
-        ssmParams:         Object.keys(store.ssm.parameters).length,
       },
     });
   });

@@ -2,7 +2,7 @@
 // SNS uses the form-encoded "query" protocol — the same shape as classic
 // EC2/SQS. We assert on XML fragments to keep the test deps minimal.
 
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { describe, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import assert from 'node:assert/strict';
 import { startServer } from './helpers/server.js';
 import { awsForm, xmlValue, xmlValues, unescapeXml } from './helpers/http.js';
@@ -10,8 +10,8 @@ import { awsForm, xmlValue, xmlValues, unescapeXml } from './helpers/http.js';
 let server;
 const sns = (action, params) => awsForm(server.endpoint, action, params, { version: '2010-03-31' });
 
-before(async () => { server = await startServer(); });
-after(() => server.close());
+beforeAll(async () => { server = await startServer(); });
+afterAll(() => server.close());
 beforeEach(() => server.resetStore());
 
 describe('Topic CRUD', () => {

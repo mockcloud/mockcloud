@@ -59,8 +59,6 @@ export function WatchPage() {
               <Stat label="S3 buckets"        value={live.s3Buckets ?? 0}/>
               <Stat label="DynamoDB tables"   value={live.dynamoTables ?? 0}/>
               <Stat label="EventBridge rules" value={live.ebRules ?? 0}/>
-              <Stat label="KMS keys"          value={live.kmsKeys ?? 0}/>
-              <Stat label="SSM parameters"    value={live.ssmParams ?? 0}/>
             </div>
 
             <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(280px,1fr))',gap:12,marginTop:12}}>

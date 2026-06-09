@@ -84,23 +84,33 @@ function updateStateMachine(req, res) {
 
 async function startExecution(req, res) {
   const b = parseBody(req);
-  const name = b.stateMachineArn?.split(':').pop();
-  const sm   = store.stepfunctions.stateMachines[name];
-  if (!sm) return errorJson(res, 400, 'StateMachineDoesNotExist', 'State machine not found');
+  const execution = startStateMachineExecution(b.stateMachineArn, b.input || '{}', b.name);
+  if (!execution) return errorJson(res, 400, 'StateMachineDoesNotExist', 'State machine not found');
+  jsonResponse(res, 200, { executionArn: execution.executionArn, startDate: execution.startDate });
+}
 
-  const execName  = b.name || `exec-${randomId(8)}`;
-  const execArn   = arn('states', `execution:${name}:${execName}`);
+// Programmatic StartExecution — shared by the HTTP API and by EventBridge
+// targets whose Arn is a state machine (arn:...:states:...:stateMachine:<name>).
+// Returns the execution object, or null if the state machine doesn't exist.
+export function startStateMachineExecution(stateMachineArn, input = '{}', execName) {
+  const name = stateMachineArn?.split(':').pop();
+  const sm   = store.stepfunctions.stateMachines[name];
+  if (!sm) return null;
+
+  const finalName = execName || `exec-${randomId(8)}`;
+  const inputStr  = typeof input === 'string' ? input : JSON.stringify(input);
+  const execArn   = arn('states', `execution:${name}:${finalName}`);
   const execution = {
-    name:             execName,
+    name:             finalName,
     executionArn:     execArn,
     stateMachineArn:  sm.arn,
-    input:            b.input || '{}',
+    input:            inputStr,
     status:           'RUNNING',
     startDate:        Date.now() / 1000,
     stopDate:         null,
     output:           null,
     history:          [
-      { timestamp: Date.now() / 1000, type: 'ExecutionStarted', executionStartedEventDetails: { input: b.input || '{}' } },
+      { timestamp: Date.now() / 1000, type: 'ExecutionStarted', executionStartedEventDetails: { input: inputStr } },
     ],
   };
 
@@ -108,17 +118,17 @@ async function startExecution(req, res) {
   store.stepfunctions.executions[execArn] = execution;
   store.addTrail({ method: 'POST', path: `/states/${name}/start`, status: 200, latency: 10 });
 
-  // Simulate execution completing after 500ms. unref so this doesn't keep
+  // Simulate execution completing after ~500ms. unref so this doesn't keep
   // the Node event loop alive in tests / short-lived embedders.
   const t = setTimeout(() => {
     execution.status   = 'SUCCEEDED';
     execution.stopDate = Date.now() / 1000;
-    execution.output   = b.input || '{}';
+    execution.output   = inputStr;
     execution.history.push({ timestamp: Date.now() / 1000, type: 'ExecutionSucceeded', executionSucceededEventDetails: { output: execution.output } });
   }, 500 + Math.random() * 1000);
   t.unref?.();
 
-  jsonResponse(res, 200, { executionArn: execArn, startDate: execution.startDate });
+  return execution;
 }
 
 function stopExecution(req, res) {

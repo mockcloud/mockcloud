@@ -11,6 +11,7 @@
 // or a downstream service (SNS subscription, EventBridge target, DDB stream).
 import { store, randomId, arn } from '../store.js';
 import { jsonResponse, errorJson, getRawBody } from '../middleware/response.js';
+import { putLogEvent } from './cloudwatchlogs.js';
 import { execFile } from 'child_process';
 import { writeFileSync, mkdirSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
@@ -107,6 +108,7 @@ export async function handler(req, res) {
       memory:      payload.MemorySize || 128,
       timeout:     payload.Timeout || 3,
       env:         payload.Environment?.Variables || {},
+      layers:      payload.Layers || [],
       code,
       invocations: 0,
       errors:      0,
@@ -180,6 +182,27 @@ export async function handler(req, res) {
     const fn = store.lambda.functions[fnName];
     if (!fn) return errorJson(res, 404, 'ResourceNotFoundException', `Function not found: ${fnName}`);
     fn.code = decodeUploadedCode(payload) || body.slice(0, 10240);
+    return jsonResponse(res, 200, fnConfig(fn));
+  }
+
+  // ── Get function configuration ─────────────────────────────────────────
+  if (method === 'GET' && fnName && action === 'configuration') {
+    const fn = store.lambda.functions[fnName];
+    if (!fn) return errorJson(res, 404, 'ResourceNotFoundException', `Function not found: ${fnName}`);
+    return jsonResponse(res, 200, fnConfig(fn));
+  }
+
+  // ── Update function configuration (timeout / memory / env / layers) ─────
+  if (method === 'PUT' && fnName && action === 'configuration') {
+    const fn = store.lambda.functions[fnName];
+    if (!fn) return errorJson(res, 404, 'ResourceNotFoundException', `Function not found: ${fnName}`);
+    if (payload.MemorySize !== undefined) fn.memory  = payload.MemorySize;
+    if (payload.Timeout    !== undefined) fn.timeout = payload.Timeout;
+    if (payload.Handler    !== undefined) fn.handler = payload.Handler;
+    if (payload.Runtime    !== undefined) fn.runtime = payload.Runtime;
+    if (payload.Role       !== undefined) fn.role    = payload.Role;
+    if (payload.Environment?.Variables)   fn.env     = payload.Environment.Variables;
+    if (payload.Layers     !== undefined) fn.layers  = payload.Layers;
     return jsonResponse(res, 200, fnConfig(fn));
   }
 
@@ -284,18 +307,40 @@ function handleEventSourceMappings(req, res, parts, method, payload) {
 //
 // Returns { result: string|null, duration: number, error: string|null, requestId }.
 // Always resolves; never throws.
+//
+// Re-entrancy guard: internally-triggered invocations (S3 / SNS / EventBridge /
+// Streams — any source other than a direct API Invoke) are capped per rolling
+// window so a Lambda → S3 → Lambda style loop can't run unbounded. Configurable
+// via MOCKCLOUD_MAX_INTERNAL_INVOKES (default 200 per 5s).
+const REENTRY_CAP = Math.max(1, parseInt(process.env.MOCKCLOUD_MAX_INTERNAL_INVOKES || '200', 10) || 200);
+let _reentryWindow = { start: 0, count: 0 };
+function internalBudgetExceeded(source) {
+  if (!source || source === 'aws-api') return false;   // direct user Invoke is never capped
+  const now = Date.now();
+  if (now - _reentryWindow.start > 5000) _reentryWindow = { start: now, count: 0 };
+  return ++_reentryWindow.count > REENTRY_CAP;
+}
+
 export async function invokeLambda(fnName, event, opts = {}) {
-  const fn = store.lambda.functions[fnName];
   const requestId = opts.requestId || randomId(36);
+  if (internalBudgetExceeded(opts.source)) {
+    return { result: null, duration: 0, error: 'MockCloud re-entrancy guard: internal invocation budget exceeded (possible event loop)', requestId };
+  }
+  const fn = store.lambda.functions[fnName];
   if (!fn) return { result: null, duration: 0, error: `Function not found: ${fnName}`, requestId };
 
   const start  = Date.now();
   fn.invocations++;
   fn.lastInvoked = Date.now();
 
+  // Stream execution logs to CloudWatch Logs at /aws/lambda/<fn> so
+  // `aws logs tail` / FilterLogEvents work like real Lambda.
+  const logGroup  = `/aws/lambda/${fn.name}`;
+  const logStream = `${new Date().toISOString().slice(0, 10).replace(/-/g, '/')}/[$LATEST]${requestId}`;
   const log = (level, msg) => {
     fn.logs.unshift({ t: Date.now(), level, msg });
     if (fn.logs.length > 200) fn.logs.length = 200;
+    try { putLogEvent(logGroup, logStream, `[${level}] ${msg}`); } catch {}
   };
   log('INFO', `START RequestId: ${requestId} Source: ${opts.source || 'unknown'}`);
 
@@ -408,6 +453,25 @@ function extractZip(buf) {
   }
 }
 
+// Environment for the sandbox. We deliberately do NOT forward the full host
+// process.env — that would leak the operator's AWS credentials/tokens into
+// arbitrary user code. buildChildEnv gives a minimal OS base plus the
+// function's own Environment.Variables AFTER filtering out runtime-hook keys
+// (NODE_OPTIONS, LD_*, DYLD_*, PATH, …) that would otherwise allow host RCE.
+// On top of that we layer the standard AWS Lambda runtime vars; setting them
+// last means fn.env can't spoof them.
+function lambdaEnv(fn) {
+  const env = buildChildEnv(fn.env);
+  env.AWS_REGION                      = process.env.AWS_REGION || 'us-east-1';
+  env.AWS_DEFAULT_REGION              = process.env.AWS_DEFAULT_REGION || 'us-east-1';
+  env.AWS_LAMBDA_FUNCTION_NAME        = fn.name;
+  env.AWS_LAMBDA_FUNCTION_VERSION     = '$LATEST';
+  env.AWS_LAMBDA_FUNCTION_MEMORY_SIZE = String(fn.memory || 128);
+  env.AWS_EXECUTION_ENV               = `AWS_Lambda_${fn.runtime || 'nodejs'}`;
+  env._HANDLER                        = fn.handler || 'index.handler';
+  return env;
+}
+
 function runInNodeSandbox(fn, payload) {
   return new Promise((resolve, reject) => {
     const tmpDir = path.join(tmpdir(), `mockcloud-lambda-${randomId(8)}`);
@@ -432,13 +496,13 @@ Promise.resolve(handler(event, {})).then(r => {
 `;
       writeFileSync(path.join(tmpDir, 'runner.js'), runner);
       const timeoutMs = Math.max(1000, (fn.timeout || 3) * 1000);
-      // process.execPath is the absolute path to the currently running Node
-      // binary, so we don't rely on PATH lookup and a tampered PATH (from
-      // fn.env) couldn't pivot us to a different executable. The child env
-      // starts minimal (no process.env spread) and adds fn.env only after
-      // filtering out NODE_OPTIONS, LD_*, DYLD_* and friends — see
-      // buildChildEnv above.
-      execFile(process.execPath, ['runner.js', payload], { cwd: tmpDir, timeout: timeoutMs, env: buildChildEnv(fn.env) }, (err, stdout, stderr) => {
+      // process.execPath is the absolute path to the running Node binary, so we
+      // don't rely on PATH lookup and a tampered PATH (from fn.env) can't pivot
+      // us to another executable. lambdaEnv builds the child env from the
+      // hardened buildChildEnv (minimal base + fn.env filtered against
+      // NODE_OPTIONS/LD_*/DYLD_*/PATH/…) and layers the AWS_LAMBDA_* runtime
+      // vars on top.
+      execFile(process.execPath, ['runner.js', payload], { cwd: tmpDir, timeout: timeoutMs, env: lambdaEnv(fn) }, (err, stdout, stderr) => {
         try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
         if (err) return reject(new Error(stderr || err.message));
         resolve(stdout || 'null');
@@ -462,6 +526,7 @@ function fnConfig(fn) {
     PackageType:  'Zip',
     Architectures: ['x86_64'],
     Environment:  { Variables: fn.env },
+    Layers:       (fn.layers || []).map(a => ({ Arn: a, CodeSize: 0 })),
     TracingConfig: { Mode: 'PassThrough' },
     EphemeralStorage: { Size: 512 },
     LoggingConfig: { LogFormat: 'Text', LogGroup: `/aws/lambda/${fn.name}` },
