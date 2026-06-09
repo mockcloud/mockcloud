@@ -22,6 +22,7 @@ import {
   GetObjectCommand,
   ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { startServer } from './helpers/server.js';
 import { makeClients } from './helpers/aws.js';
 
@@ -249,5 +250,48 @@ describe('Bucket policy', () => {
       () => s3.send(new GetBucketPolicyCommand({ Bucket: bucket })),
       err => { assert.equal(err.$metadata.httpStatusCode, 404); return true; }
     );
+  });
+});
+
+// ── Presigned URLs (real SigV4 query-param signing) ────────────────────────────
+
+describe('Presigned URLs', () => {
+  it('presigned GET fetches the object body', async () => {
+    const bucket = freshBucket();
+    await s3.send(new CreateBucketCommand({ Bucket: bucket }));
+    await s3.send(new PutObjectCommand({ Bucket: bucket, Key: 'hello.txt', Body: Buffer.from('presigned-body') }));
+
+    const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: 'hello.txt' }), { expiresIn: 60 });
+    assert.match(url, /X-Amz-Signature=/);
+    const res = await fetch(url);
+    assert.equal(res.status, 200);
+    assert.equal(await res.text(), 'presigned-body');
+  });
+
+  it('presigned PUT uploads an object that reads back via the SDK', async () => {
+    const bucket = freshBucket();
+    await s3.send(new CreateBucketCommand({ Bucket: bucket }));
+
+    const url = await getSignedUrl(s3, new PutObjectCommand({ Bucket: bucket, Key: 'up.txt' }), { expiresIn: 60 });
+    const put = await fetch(url, { method: 'PUT', body: 'uploaded-via-presign' });
+    assert.equal(put.status, 200);
+
+    const get = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: 'up.txt' }));
+    const chunks = [];
+    for await (const chunk of get.Body) chunks.push(chunk);
+    assert.equal(Buffer.concat(chunks).toString(), 'uploaded-via-presign');
+  });
+
+  it('an expired presigned URL is rejected with 403', async () => {
+    const bucket = freshBucket();
+    await s3.send(new CreateBucketCommand({ Bucket: bucket }));
+    await s3.send(new PutObjectCommand({ Bucket: bucket, Key: 'k.txt', Body: Buffer.from('x') }));
+
+    const u = new URL(await getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: 'k.txt' }), { expiresIn: 60 }));
+    // Rewind the signing time well past the 60s window — MockCloud ignores the
+    // (now-invalid) signature but enforces X-Amz-Date + X-Amz-Expires.
+    u.searchParams.set('X-Amz-Date', '20200101T000000Z');
+    const res = await fetch(u);
+    assert.equal(res.status, 403);
   });
 });

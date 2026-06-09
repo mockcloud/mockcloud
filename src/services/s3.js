@@ -34,6 +34,19 @@ export async function handler(req, res) {
   const pathParts = url.pathname.replace(/^\//, '').split('/').filter(Boolean);
   const method    = req.method;
 
+  // ── Presigned-URL expiry ──────────────────────────────────────────────────
+  // Only presigned requests carry X-Amz-Algorithm in the query string (header-
+  // based SigV4 keeps the signature in the Authorization header). MockCloud
+  // doesn't verify the signature — it trusts local callers — but it DOES honor
+  // the X-Amz-Expires window so presigned-URL expiry can be tested.
+  if (url.searchParams.has('X-Amz-Algorithm')) {
+    const signedMs = parseAmzDate(url.searchParams.get('X-Amz-Date'));
+    const expires  = parseInt(url.searchParams.get('X-Amz-Expires') || '0', 10);
+    if (signedMs && expires > 0 && Date.now() > signedMs + expires * 1000) {
+      return s3Error(res, 403, 'AccessDenied', 'Request has expired');
+    }
+  }
+
   // ── List all buckets ────────────────────────────────────────────────────
   if (method === 'GET' && url.pathname === '/') {
     const buckets = Object.values(store.s3.buckets);
@@ -410,4 +423,11 @@ function extractMetadata(headers) {
     if (k.startsWith('x-amz-meta-')) meta[k.slice(11)] = v;
   }
   return meta;
+}
+
+// Parse an X-Amz-Date stamp (YYYYMMDDTHHMMSSZ, always UTC) to epoch ms.
+function parseAmzDate(s) {
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(s || '');
+  if (!m) return null;
+  return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
 }
