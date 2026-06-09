@@ -94,9 +94,12 @@ export async function handler(req, res) {
       const visMs = (parseInt(params.get('VisibilityTimeout') || '30')) * 1000;
       const msgs = selectMessages(q, maxMsgs);
       msgs.forEach(m => hideMessage(m, visMs));
-      const xml = msgs.map(m =>
-        `<Message><MessageId>${m.id}</MessageId><ReceiptHandle>${m.receiptHandle}</ReceiptHandle><Body>${escapeXml(m.body)}</Body><MD5OfBody>${md5(m.body)}</MD5OfBody></Message>`
-      ).join('');
+      const xml = msgs.map(m => {
+        const a = { ApproximateReceiveCount: m.approxReceiveCount || 1, SentTimestamp: m.sent,
+          ...(q.type === 'fifo' ? { MessageGroupId: m.groupId, SequenceNumber: m.sequenceNumber } : {}) };
+        const attrXml = Object.entries(a).map(([n, v]) => `<Attribute><Name>${n}</Name><Value>${escapeXml(String(v))}</Value></Attribute>`).join('');
+        return `<Message><MessageId>${m.id}</MessageId><ReceiptHandle>${m.receiptHandle}</ReceiptHandle><Body>${escapeXml(m.body)}</Body><MD5OfBody>${md5(m.body)}</MD5OfBody>${attrXml}</Message>`;
+      }).join('');
       return xmlResponse(res, 200, sqsWrap('ReceiveMessageResponse','ReceiveMessageResult', xml));
     }
     case 'DeleteMessage': {
@@ -219,7 +222,11 @@ function handleJsonProtocol(req, res, action, payload) {
       return jsonResponse(res, 200, {
         Messages: msgs.map(m => ({
           MessageId: m.id, ReceiptHandle: m.receiptHandle, Body: m.body, MD5OfBody: md5(m.body),
-          ...(q.type === 'fifo' ? { Attributes: { MessageGroupId: m.groupId, SequenceNumber: m.sequenceNumber, ...(m.dedupeId ? { MessageDeduplicationId: m.dedupeId } : {}) } } : {}),
+          Attributes: {
+            ApproximateReceiveCount: String(m.approxReceiveCount || 1),
+            SentTimestamp: String(m.sent),
+            ...(q.type === 'fifo' ? { MessageGroupId: m.groupId, SequenceNumber: m.sequenceNumber, ...(m.dedupeId ? { MessageDeduplicationId: m.dedupeId } : {}) } : {}),
+          },
         }))
       });
     }
@@ -246,6 +253,7 @@ export function enqueueMessage(queueUrl, body, opts = {}) {
     sent:          Date.now(),
     visible:       true,
     dedupeId:      opts.dedupeId || null,
+    approxReceiveCount: 0,
   };
 
   if (q.type === 'fifo') {
@@ -276,6 +284,7 @@ export function enqueueMessage(queueUrl, body, opts = {}) {
 // skipping any group with an in-flight (not-visible) message — preserving
 // per-group ordering while allowing parallelism across groups.
 function selectMessages(q, maxMsgs) {
+  applyRedrive(q);
   if (q.type !== 'fifo') return q.messages.filter(m => m.visible).slice(0, maxMsgs);
   const locked = new Set(q.messages.filter(m => !m.visible).map(m => m.groupId));
   const chosen = [];
@@ -301,6 +310,32 @@ function queueUrlFor(name) {
   return `http://localhost:4566/${ACCOUNT}/${name}`;
 }
 
+// Dead-letter redrive: when a message has been received >= maxReceiveCount times
+// (per the queue's RedrivePolicy) move it to the DLQ instead of re-delivering.
+// Evaluated at receive time (via selectMessages).
+function parseRedrive(q) {
+  try {
+    const p = JSON.parse(q.attributes?.RedrivePolicy || '');
+    if (p && p.deadLetterTargetArn && p.maxReceiveCount) return { arn: p.deadLetterTargetArn, max: Number(p.maxReceiveCount) };
+  } catch {}
+  return null;
+}
+
+function applyRedrive(q) {
+  const rd = parseRedrive(q);
+  if (!rd) return;
+  const dlqUrl = queueUrlForArn(rd.arn);
+  if (!dlqUrl || !store.sqs.queues[dlqUrl]) return;
+  const survivors = [];
+  for (const m of q.messages) {
+    if ((m.approxReceiveCount || 0) >= rd.max) {
+      cancelVisibilityTimer(m);
+      enqueueMessage(dlqUrl, m.body, { groupId: m.groupId });
+    } else survivors.push(m);
+  }
+  q.messages = survivors;
+}
+
 // Hide a message and schedule its visibility to be restored after `ms`. We
 // store the timer on the message so DeleteMessage / PurgeQueue can cancel it.
 // Without cancellation the closure used to silently re-mark a deleted message
@@ -308,6 +343,7 @@ function queueUrlFor(name) {
 // tests and made invariants fuzzy).
 function hideMessage(m, ms) {
   m.visible = false;
+  m.approxReceiveCount = (m.approxReceiveCount || 0) + 1;
   cancelVisibilityTimer(m);
   m._visTimer = setTimeout(() => {
     m.visible = true;
