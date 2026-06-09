@@ -283,7 +283,7 @@ export function enqueueMessage(queueUrl, body, opts = {}) {
 // visible messages. FIFO: in sequence order, at most one per message group,
 // skipping any group with an in-flight (not-visible) message — preserving
 // per-group ordering while allowing parallelism across groups.
-function selectMessages(q, maxMsgs) {
+export function selectMessages(q, maxMsgs) {
   applyRedrive(q);
   if (q.type !== 'fifo') return q.messages.filter(m => m.visible).slice(0, maxMsgs);
   const locked = new Set(q.messages.filter(m => !m.visible).map(m => m.groupId));
@@ -341,7 +341,7 @@ function applyRedrive(q) {
 // Without cancellation the closure used to silently re-mark a deleted message
 // as visible (harmless if the queue was deleted, but it kept node alive in
 // tests and made invariants fuzzy).
-function hideMessage(m, ms) {
+export function hideMessage(m, ms) {
   m.visible = false;
   m.approxReceiveCount = (m.approxReceiveCount || 0) + 1;
   cancelVisibilityTimer(m);
@@ -352,14 +352,14 @@ function hideMessage(m, ms) {
   m._visTimer.unref?.();
 }
 
-function cancelVisibilityTimer(m) {
+export function cancelVisibilityTimer(m) {
   if (m && m._visTimer) {
     clearTimeout(m._visTimer);
     m._visTimer = null;
   }
 }
 
-function removeAndCancel(messages, predicate) {
+export function removeAndCancel(messages, predicate) {
   const kept = [];
   for (const m of messages) {
     if (predicate(m)) cancelVisibilityTimer(m);

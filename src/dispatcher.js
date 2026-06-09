@@ -10,6 +10,7 @@ import { handler as ec2Handler }    from './services/ec2.js';
 import { handler as smHandler }     from './services/secretsmanager.js';
 import { handler as ebHandler }     from './services/eventbridge.js';
 import { handler as ddbSHandler }   from './services/dynamodbstreams.js';
+import './services/lambda-esm.js';  // side-effect: registers the SQS→Lambda poll tick
 
 const IAM_ACTIONS = new Set(['AssumeRole','GetCallerIdentity','GetSessionToken','CreateRole','DeleteRole','GetRole','ListRoles','ListRolePolicies','ListAttachedRolePolicies','ListRoleTags','CreatePolicy','AttachRolePolicy','DetachRolePolicy','PutRolePolicy','DeleteRolePolicy','CreateUser','GetUser','ListUsers','DeleteUser','CreateAccessKey','ListInstanceProfilesForRole','GetSessionToken']);
 const EC2_ACTIONS = new Set(['RunInstances','DescribeInstances','DescribeInstanceStatus','DescribeInstanceAttribute','TerminateInstances','StopInstances','StartInstances','CreateSecurityGroup','DescribeSecurityGroups','DeleteSecurityGroup','AuthorizeSecurityGroupIngress','AuthorizeSecurityGroupEgress','RevokeSecurityGroupIngress','RevokeSecurityGroupEgress','CreateKeyPair','DescribeKeyPairs','DeleteKeyPair','ImportKeyPair','DescribeImages','DescribeAvailabilityZones','DescribeRegions','DescribeVpcs','DescribeSubnets','DescribeInternetGateways','DescribeRouteTables','DescribeInstanceTypes','CreateTags','DescribeSecurityGroupRules']);
