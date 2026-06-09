@@ -503,6 +503,9 @@ function scan(res, payload) {
   const name = payload.TableName;
   const table = store.dynamodb.tables[name];
   if (!table) return errorJson(res, 400, 'ResourceNotFoundException', `Table ${name} not found`);
+  if (payload.IndexName && !(table.indexes || []).some(ix => ix.name === payload.IndexName)) {
+    return errorJson(res, 400, 'ValidationException', `The table does not have the specified index: ${payload.IndexName}`);
+  }
   sweepExpired(table);
 
   const { pk, sk, index } = keyAttrs(table, payload.IndexName);
@@ -597,6 +600,9 @@ function query(res, payload) {
   const name = payload.TableName;
   const table = store.dynamodb.tables[name];
   if (!table) return errorJson(res, 400, 'ResourceNotFoundException', `Table ${name} not found`);
+  if (payload.IndexName && !(table.indexes || []).some(ix => ix.name === payload.IndexName)) {
+    return errorJson(res, 400, 'ValidationException', `The table does not have the specified index: ${payload.IndexName}`);
+  }
 
   const r = runQuery(table, payload);
   if (r.error) return errorJson(res, 400, 'ValidationException', r.error);
