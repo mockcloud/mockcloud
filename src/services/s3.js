@@ -69,7 +69,7 @@ export async function handler(req, res) {
     url.searchParams.has('publicAccessBlock') || url.searchParams.has('versioning') ||
     url.searchParams.has('policy') || url.searchParams.has('cors') ||
     url.searchParams.has('tagging') || url.searchParams.has('logging') ||
-    url.searchParams.has('versions');
+    url.searchParams.has('versions') || url.searchParams.has('notification');
   if (method === 'PUT' && !objectKey && !hasSubResource) {
     if (store.s3.buckets[bucketName]) {
       return s3Error(res, 409, 'BucketAlreadyOwnedByYou', `Bucket ${bucketName} already exists`);
@@ -217,6 +217,22 @@ export async function handler(req, res) {
       return xmlResponse(res, 200, bucket.cors);
     }
     if (method === 'DELETE') { bucket.cors = null; res.writeHead(204); res.end(); return; }
+  }
+
+  // ── Bucket sub-resource: ?notification ────────────────────────────────────
+  if (!objectKey && url.searchParams.has('notification')) {
+    const bucket = store.s3.buckets[bucketName];
+    if (!bucket) return s3Error(res, 404, 'NoSuchBucket', `Bucket ${bucketName} does not exist`);
+    if (method === 'PUT') {
+      const raw = getRawBuffer(req).toString();
+      bucket.notificationXml     = raw;                       // kept verbatim for GET round-trips
+      bucket.notificationConfigs = parseNotificationConfig(raw);
+      res.writeHead(200); res.end(); return;
+    }
+    if (method === 'GET') {
+      return xmlResponse(res, 200, bucket.notificationXml ||
+        '<?xml version="1.0" encoding="UTF-8"?><NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"></NotificationConfiguration>');
+    }
   }
 
   // ── Bucket sub-resource: ?tagging ───────────────────────────────────────
@@ -375,6 +391,7 @@ export async function handler(req, res) {
       bucket.objectVersions[objectKey] = [meta, ...(bucket.objectVersions[objectKey] || [])];
     }
     store.addTrail({ method: 'PUT', path: `/s3/${bucketName}/${objectKey}`, status: 200, latency: 2 });
+    emitS3Event(bucketName, objectKey, 's3:ObjectCreated:Put', meta);
     const headers = { 'ETag': `"${etag}"` };
     if (versioned) headers['x-amz-version-id'] = versionId;
     res.writeHead(200, headers);
@@ -422,6 +439,7 @@ export async function handler(req, res) {
       bucket.objectVersions[objectKey] = [marker, ...(bucket.objectVersions[objectKey] || [])];
       bucket.objects[objectKey] = marker;
       store.addTrail({ method: 'DELETE', path: `/s3/${bucketName}/${objectKey}`, status: 204, latency: 1 });
+      emitS3Event(bucketName, objectKey, 's3:ObjectRemoved:DeleteMarkerCreated', marker);
       res.writeHead(204, { 'x-amz-version-id': marker.versionId, 'x-amz-delete-marker': 'true' });
       res.end(); return;
     }
@@ -430,6 +448,7 @@ export async function handler(req, res) {
     delete bucket.objects[objectKey];
     try { rmSync(diskPath(bucketName, objectKey), { force: true }); } catch {}
     store.addTrail({ method: 'DELETE', path: `/s3/${bucketName}/${objectKey}`, status: 204, latency: 1 });
+    emitS3Event(bucketName, objectKey, 's3:ObjectRemoved:Delete', { key: objectKey });
     res.writeHead(204); res.end(); return;
   }
 
@@ -572,4 +591,93 @@ function parseAmzDate(s) {
   const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(s || '');
   if (!m) return null;
   return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+}
+
+// ── Bucket notifications ────────────────────────────────────────────────────
+// Parse a <NotificationConfiguration> body into a flat list of delivery targets.
+// The on-the-wire element names differ per destination (SDK serializes Lambda as
+// <CloudFunctionConfiguration>/<CloudFunction>), so each is grabbed explicitly.
+function parseNotificationConfig(xml) {
+  const out = [];
+  const grab = (blockTag, arnTag, type) => {
+    const re = new RegExp(`<${blockTag}\\b[^>]*>([\\s\\S]*?)<\\/${blockTag}>`, 'g');
+    let m;
+    while ((m = re.exec(xml)) !== null) {
+      const inner = m[1];
+      const arnM  = inner.match(new RegExp(`<${arnTag}>([^<]+)<\\/${arnTag}>`));
+      if (!arnM) continue;
+      const events = [];
+      const evRe = /<Event>([^<]+)<\/Event>/g;
+      let e; while ((e = evRe.exec(inner)) !== null) events.push(e[1]);
+      out.push({ type, arn: arnM[1].trim(), events, prefix: filterRuleValue(inner, 'prefix'), suffix: filterRuleValue(inner, 'suffix') });
+    }
+  };
+  grab('QueueConfiguration',          'Queue',             'sqs');
+  grab('TopicConfiguration',          'Topic',             'sns');
+  grab('CloudFunctionConfiguration',  'CloudFunction',     'lambda');
+  grab('LambdaFunctionConfiguration', 'LambdaFunctionArn', 'lambda');
+  return out;
+}
+
+function filterRuleValue(inner, name) {
+  const m = inner.match(new RegExp(`<FilterRule>\\s*<Name>${name}<\\/Name>\\s*<Value>([^<]*)<\\/Value>`, 'i'));
+  return m ? m[1] : null;
+}
+
+// 's3:ObjectCreated:*' matches 's3:ObjectCreated:Put'; exact names match exactly.
+function eventMatches(events, name) {
+  return (events || []).some(e => e === name || (e.endsWith('*') && name.startsWith(e.slice(0, -1))));
+}
+
+// Standard S3 event-notification envelope. eventName drops the 's3:' prefix
+// (matching real S3 records, e.g. 'ObjectCreated:Put').
+function buildS3Event(bucketName, key, eventName, meta) {
+  return { Records: [{
+    eventVersion: '2.1',
+    eventSource:  'aws:s3',
+    awsRegion:    store.s3.buckets[bucketName]?.region || 'us-east-1',
+    eventTime:    new Date().toISOString(),
+    eventName:    eventName.replace(/^s3:/, ''),
+    s3: {
+      s3SchemaVersion: '1.0',
+      bucket: { name: bucketName, arn: `arn:aws:s3:::${bucketName}` },
+      object: {
+        key,
+        size: meta?.size ?? 0,
+        eTag: meta?.etag,
+        ...(meta?.versionId ? { versionId: meta.versionId } : {}),
+      },
+    },
+  }] };
+}
+
+// Fire matching notifications for an object event. Delivery is fire-and-forget
+// (matches AWS: the PUT/DELETE response doesn't wait on the destination).
+function emitS3Event(bucketName, key, eventName, meta) {
+  const configs = store.s3.buckets[bucketName]?.notificationConfigs;
+  if (!configs || !configs.length) return;
+  for (const cfg of configs) {
+    if (!eventMatches(cfg.events, eventName)) continue;
+    if (cfg.prefix && !key.startsWith(cfg.prefix)) continue;
+    if (cfg.suffix && !key.endsWith(cfg.suffix))   continue;
+    deliverNotification(cfg, buildS3Event(bucketName, key, eventName, meta)).catch(() => {});
+  }
+}
+
+// Lazy imports avoid a load-time cycle (sqs/sns/lambda don't import s3, but this
+// keeps the dependency direction one-way and matches sns.js's fanout pattern).
+async function deliverNotification(cfg, event) {
+  const payload = JSON.stringify(event);
+  if (cfg.type === 'sqs') {
+    const { enqueueMessage, queueUrlForArn } = await import('./sqs.js');
+    const queueUrl = queueUrlForArn(cfg.arn);
+    if (queueUrl && store.sqs.queues[queueUrl]) enqueueMessage(queueUrl, payload);
+  } else if (cfg.type === 'sns') {
+    const { fanoutSnsMessage } = await import('./sns.js');
+    const topic = store.sns.topics[cfg.arn];
+    if (topic) { topic.published++; await fanoutSnsMessage(topic, { msgId: randomId(36), message: payload, subject: 'Amazon S3 Notification' }); }
+  } else if (cfg.type === 'lambda') {
+    const { invokeLambda } = await import('./lambda.js');
+    await invokeLambda(cfg.arn.split(':').pop(), event, { source: 's3' });
+  }
 }
