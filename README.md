@@ -70,9 +70,11 @@ for the test suite). Clone it, read it, hack on it.
 MockCloud favors realistic behavior for everyday SDK/Terraform workflows over
 100% API fidelity. Notable gaps:
 
-- **Presigned URL signatures are not cryptographically verified** — the URL
-  structure is validated, but the SigV4 signature isn't recomputed (no IAM
-  enforcement; any well-formed request is accepted).
+- **Signatures and IAM are not enforced by default** — any well-formed request
+  is accepted. Opt in with `MOCKCLOUD_VERIFY_SIGV4=true` (recompute SigV4) and
+  `MOCKCLOUD_IAM=soft|strict` (evaluate policies). The SigV4 reconstruction
+  targets the canonical forms the AWS SDK v3 clients produce; exotic S3 key
+  double-encoding isn't covered.
 - **EventBridge `cron(...)`** schedules are approximated to a ~1-minute cadence;
   `rate(...)` is exact. Event-pattern matching covers `source` + `detail-type`.
 - **SNS `FilterPolicy`** and **CloudWatch Logs filter patterns** implement a
@@ -181,6 +183,9 @@ provider "aws" {
 | `MOCKCLOUD_DISABLE_UI` | `false` | Skip the console UI server (headless / CI — only the API listens) |
 | `MOCKCLOUD_ENABLE_TERMINAL` | `false` | Enable the in-console shell. It runs host commands, so it's off by default; loopback binds only unless set to `force` |
 | `MOCKCLOUD_MAX_INTERNAL_INVOKES` | `200` | Re-entrancy cap: max internally-triggered (S3/SNS/EventBridge/Streams) Lambda invokes per 5s |
+| `MOCKCLOUD_VERIFY_SIGV4` | `false` | When `true`, recompute the SigV4 signature (Authorization header or presigned query) against the stored secret and reject mismatches — `403 SignatureDoesNotMatch` / `InvalidAccessKeyId`. Off by default (any well-formed request is accepted) |
+| `MOCKCLOUD_IAM` | `off` | `soft` logs would-be authorization denials; `strict` enforces identity + resource policies for S3/SQS/SNS/Lambda/STS and returns `403 AccessDenied`. Off by default |
+| `MOCKCLOUD_POLL_INTERVAL_MS` | `1000` | Background poll cadence (SQS→Lambda mappings, EventBridge schedules) |
 
 ---
 
