@@ -20,7 +20,9 @@ import {
   DeleteBucketPolicyCommand,
   PutObjectCommand,
   GetObjectCommand,
+  DeleteObjectCommand,
   ListObjectsV2Command,
+  ListObjectVersionsCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { startServer } from './helpers/server.js';
@@ -293,5 +295,83 @@ describe('Presigned URLs', () => {
     u.searchParams.set('X-Amz-Date', '20200101T000000Z');
     const res = await fetch(u);
     assert.equal(res.status, 403);
+  });
+});
+
+// ── Object versioning ──────────────────────────────────────────────────────────
+
+describe('Object versioning', () => {
+  async function readBody(get) {
+    const chunks = [];
+    for await (const c of get.Body) chunks.push(c);
+    return Buffer.concat(chunks).toString();
+  }
+  async function enableVersioning(bucket) {
+    await s3.send(new CreateBucketCommand({ Bucket: bucket }));
+    await s3.send(new PutBucketVersioningCommand({ Bucket: bucket, VersioningConfiguration: { Status: 'Enabled' } }));
+  }
+
+  it('PutObject returns distinct VersionIds and keeps every version', async () => {
+    const bucket = freshBucket();
+    await enableVersioning(bucket);
+    const v1 = await s3.send(new PutObjectCommand({ Bucket: bucket, Key: 'doc', Body: Buffer.from('one') }));
+    const v2 = await s3.send(new PutObjectCommand({ Bucket: bucket, Key: 'doc', Body: Buffer.from('two') }));
+    assert.ok(v1.VersionId);
+    assert.ok(v2.VersionId);
+    assert.notEqual(v1.VersionId, v2.VersionId);
+
+    assert.equal(await readBody(await s3.send(new GetObjectCommand({ Bucket: bucket, Key: 'doc' }))), 'two');
+    assert.equal(await readBody(await s3.send(new GetObjectCommand({ Bucket: bucket, Key: 'doc', VersionId: v1.VersionId }))), 'one');
+  });
+
+  it('ListObjectVersions reports all versions with IsLatest', async () => {
+    const bucket = freshBucket();
+    await enableVersioning(bucket);
+    const v1 = await s3.send(new PutObjectCommand({ Bucket: bucket, Key: 'k', Body: Buffer.from('a') }));
+    const v2 = await s3.send(new PutObjectCommand({ Bucket: bucket, Key: 'k', Body: Buffer.from('bb') }));
+
+    const list = await s3.send(new ListObjectVersionsCommand({ Bucket: bucket }));
+    assert.equal(list.Versions.length, 2);
+    assert.equal(list.Versions.find(v => v.IsLatest).VersionId, v2.VersionId);
+    assert.equal(list.Versions.find(v => v.VersionId === v1.VersionId).IsLatest, false);
+  });
+
+  it('DeleteObject inserts a delete marker; the key 404s but old versions remain', async () => {
+    const bucket = freshBucket();
+    await enableVersioning(bucket);
+    const v1 = await s3.send(new PutObjectCommand({ Bucket: bucket, Key: 'k', Body: Buffer.from('live') }));
+
+    const del = await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: 'k' }));
+    assert.equal(del.DeleteMarker, true);
+    assert.ok(del.VersionId);
+
+    await assert.rejects(
+      () => s3.send(new GetObjectCommand({ Bucket: bucket, Key: 'k' })),
+      err => { assert.equal(err.$metadata.httpStatusCode, 404); return true; }
+    );
+    assert.equal(await readBody(await s3.send(new GetObjectCommand({ Bucket: bucket, Key: 'k', VersionId: v1.VersionId }))), 'live');
+
+    const list = await s3.send(new ListObjectVersionsCommand({ Bucket: bucket }));
+    assert.equal(list.DeleteMarkers.length, 1);
+    assert.equal(list.Versions.length, 1);
+
+    const v2list = await s3.send(new ListObjectsV2Command({ Bucket: bucket }));
+    assert.ok(!(v2list.Contents || []).some(o => o.Key === 'k'));
+  });
+
+  it('DeleteObject with a VersionId permanently removes that version', async () => {
+    const bucket = freshBucket();
+    await enableVersioning(bucket);
+    const v1 = await s3.send(new PutObjectCommand({ Bucket: bucket, Key: 'k', Body: Buffer.from('one') }));
+    await s3.send(new PutObjectCommand({ Bucket: bucket, Key: 'k', Body: Buffer.from('two') }));
+
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: 'k', VersionId: v1.VersionId }));
+    await assert.rejects(
+      () => s3.send(new GetObjectCommand({ Bucket: bucket, Key: 'k', VersionId: v1.VersionId })),
+      err => { assert.equal(err.$metadata.httpStatusCode, 404); return true; }
+    );
+    assert.equal(await readBody(await s3.send(new GetObjectCommand({ Bucket: bucket, Key: 'k' }))), 'two');
+    const list = await s3.send(new ListObjectVersionsCommand({ Bucket: bucket }));
+    assert.equal(list.Versions.length, 1);
   });
 });

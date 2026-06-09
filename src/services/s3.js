@@ -68,7 +68,8 @@ export async function handler(req, res) {
   const hasSubResource = url.searchParams.has('website') || url.searchParams.has('acl') ||
     url.searchParams.has('publicAccessBlock') || url.searchParams.has('versioning') ||
     url.searchParams.has('policy') || url.searchParams.has('cors') ||
-    url.searchParams.has('tagging') || url.searchParams.has('logging');
+    url.searchParams.has('tagging') || url.searchParams.has('logging') ||
+    url.searchParams.has('versions');
   if (method === 'PUT' && !objectKey && !hasSubResource) {
     if (store.s3.buckets[bucketName]) {
       return s3Error(res, 409, 'BucketAlreadyOwnedByYou', `Bucket ${bucketName} already exists`);
@@ -79,6 +80,7 @@ export async function handler(req, res) {
       region,
       created: Date.now(),
       objects: {},
+      objectVersions: {},
       website: null,
       acl: 'private',
       publicAccessBlock: { blockPublicAcls: true, ignorePublicAcls: true, blockPublicPolicy: true, restrictPublicBuckets: true },
@@ -161,6 +163,38 @@ export async function handler(req, res) {
     }
   }
 
+  // ── Bucket sub-resource: ?versions (ListObjectVersions) ───────────────────
+  if (!objectKey && url.searchParams.has('versions') && method === 'GET') {
+    const bucket = store.s3.buckets[bucketName];
+    if (!bucket) return s3Error(res, 404, 'NoSuchBucket', `Bucket ${bucketName} does not exist`);
+    const prefix    = url.searchParams.get('prefix') || '';
+    const versions  = [];
+    const markers   = [];
+    const keys = new Set([
+      ...Object.keys(bucket.objects || {}),
+      ...Object.keys(bucket.objectVersions || {}),
+    ]);
+    for (const key of keys) {
+      if (!key.startsWith(prefix)) continue;
+      const history = bucket.objectVersions?.[key];
+      if (history && history.length) {
+        history.forEach((v, i) => {
+          const latest = i === 0;
+          if (v.isDeleteMarker) {
+            markers.push(`<DeleteMarker><Key>${escapeXml(key)}</Key><VersionId>${v.versionId}</VersionId><IsLatest>${latest}</IsLatest><LastModified>${new Date(v.modified).toISOString()}</LastModified></DeleteMarker>`);
+          } else {
+            versions.push(`<Version><Key>${escapeXml(key)}</Key><VersionId>${v.versionId}</VersionId><IsLatest>${latest}</IsLatest><LastModified>${new Date(v.modified).toISOString()}</LastModified><ETag>&quot;${v.etag}&quot;</ETag><Size>${v.size}</Size><StorageClass>STANDARD</StorageClass></Version>`);
+          }
+        });
+      } else {
+        const o = bucket.objects[key];
+        if (o && !o.isDeleteMarker) versions.push(`<Version><Key>${escapeXml(key)}</Key><VersionId>null</VersionId><IsLatest>true</IsLatest><LastModified>${new Date(o.modified).toISOString()}</LastModified><ETag>&quot;${o.etag}&quot;</ETag><Size>${o.size}</Size><StorageClass>STANDARD</StorageClass></Version>`);
+      }
+    }
+    return xmlResponse(res, 200,
+      `<?xml version="1.0"?><ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>${escapeXml(bucketName)}</Name><Prefix>${escapeXml(prefix)}</Prefix><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated>${versions.join('')}${markers.join('')}</ListVersionsResult>`);
+  }
+
   // ── Bucket sub-resource: ?policy ────────────────────────────────────────
   if (!objectKey && url.searchParams.has('policy')) {
     const bucket = store.s3.buckets[bucketName];
@@ -237,7 +271,7 @@ export async function handler(req, res) {
     const maxKeys   = parseInt(url.searchParams.get('max-keys') || '1000');
     const listType  = url.searchParams.get('list-type'); // '2' for ListObjectsV2
     const objects   = Object.values(bucket.objects)
-      .filter(o => o.key.startsWith(prefix))
+      .filter(o => o.key.startsWith(prefix) && !o.isDeleteMarker)
       .slice(0, maxKeys);
     const contents = objects.map(o =>
       `<Contents><Key>${escapeXml(o.key)}</Key><Size>${o.size}</Size><LastModified>${new Date(o.modified).toISOString()}</LastModified><ETag>&quot;${o.etag}&quot;</ETag><StorageClass>STANDARD</StorageClass></Contents>`
@@ -252,33 +286,63 @@ export async function handler(req, res) {
   // ── Head object ─────────────────────────────────────────────────────────
   if (method === 'HEAD' && objectKey) {
     if (!bucket) { res.writeHead(404); res.end(); return; }
-    const obj = bucket.objects[objectKey];
-    if (!obj) { res.writeHead(404); res.end(); return; }
-    res.writeHead(200, {
+    const versionId = url.searchParams.get('versionId');
+    let obj;
+    if (versionId) {
+      obj = (bucket.objectVersions?.[objectKey] || []).find(v => v.versionId === versionId);
+      if (!obj || obj.isDeleteMarker) { res.writeHead(404); res.end(); return; }
+    } else {
+      obj = bucket.objects[objectKey];
+      if (!obj) { res.writeHead(404); res.end(); return; }
+      if (obj.isDeleteMarker) {
+        const h = { 'x-amz-delete-marker': 'true' };
+        if (obj.versionId) h['x-amz-version-id'] = obj.versionId;
+        res.writeHead(404, h); res.end(); return;
+      }
+    }
+    const headers = {
       'Content-Length': obj.size,
       'Content-Type':   obj.contentType,
       'ETag':           `"${obj.etag}"`,
       'Last-Modified':  new Date(obj.modified).toUTCString(),
       ...metaHeaders(obj.metadata),
-    });
+    };
+    if (obj.versionId) headers['x-amz-version-id'] = obj.versionId;
+    res.writeHead(200, headers);
     res.end(); return;
   }
 
   // ── Get object ──────────────────────────────────────────────────────────
   if (method === 'GET' && objectKey) {
     if (!bucket) return s3Error(res, 404, 'NoSuchBucket', `No such bucket`);
-    const obj = bucket.objects[objectKey];
-    if (!obj) return s3Error(res, 404, 'NoSuchKey', `The specified key does not exist.`);
+    const versionId = url.searchParams.get('versionId');
+    let obj, readVersionId = null;
+    if (versionId) {
+      obj = (bucket.objectVersions?.[objectKey] || []).find(v => v.versionId === versionId);
+      if (!obj) return s3Error(res, 404, 'NoSuchVersion', 'The specified version does not exist.');
+      if (obj.isDeleteMarker) return s3Error(res, 404, 'NoSuchKey', 'The specified key does not exist.');
+      readVersionId = versionId;
+    } else {
+      obj = bucket.objects[objectKey];
+      if (!obj) return s3Error(res, 404, 'NoSuchKey', `The specified key does not exist.`);
+      if (obj.isDeleteMarker) {
+        res.setHeader('x-amz-delete-marker', 'true');
+        if (obj.versionId) res.setHeader('x-amz-version-id', obj.versionId);
+        return s3Error(res, 404, 'NoSuchKey', 'The specified key does not exist.');
+      }
+    }
     let buf;
-    try { buf = readObjectFromDisk(bucketName, objectKey); }
+    try { buf = readVersionId ? readObjectVersionFromDisk(bucketName, objectKey, readVersionId) : readObjectFromDisk(bucketName, objectKey); }
     catch { return s3Error(res, 500, 'InternalError', 'Failed to read object body'); }
-    res.writeHead(200, {
+    const headers = {
       'Content-Type':   obj.contentType || 'application/octet-stream',
       'Content-Length': buf.length,
       'ETag':           `"${obj.etag}"`,
       'Last-Modified':  new Date(obj.modified).toUTCString(),
       ...metaHeaders(obj.metadata),
-    });
+    };
+    if (obj.versionId) headers['x-amz-version-id'] = obj.versionId;
+    res.writeHead(200, headers);
     res.end(buf);
     return;
   }
@@ -286,26 +350,83 @@ export async function handler(req, res) {
   // ── Put object ──────────────────────────────────────────────────────────
   if (method === 'PUT' && objectKey) {
     if (!bucket) return s3Error(res, 404, 'NoSuchBucket', `No such bucket`);
-    const buf  = getRawBuffer(req);
-    const etag = crypto.createHash('md5').update(buf).digest('hex');
-    try { writeObjectToDisk(bucketName, objectKey, buf); }
+    const buf       = getRawBuffer(req);
+    const etag      = crypto.createHash('md5').update(buf).digest('hex');
+    const versioned = bucket.versioning === 'Enabled';
+    const versionId = versioned ? newVersionId() : null;
+    try {
+      writeObjectToDisk(bucketName, objectKey, buf);                       // current head
+      if (versioned) writeVersionToDisk(bucketName, objectKey, versionId, buf);
+    }
     catch (e) { return s3Error(res, 500, 'InternalError', `Failed to persist object: ${e.message}`); }
-    bucket.objects[objectKey] = {
-      key:         objectKey,
-      size:        buf.length,
-      contentType: req.headers['content-type'] || 'application/octet-stream',
+    const meta = {
+      key:            objectKey,
+      size:           buf.length,
+      contentType:    req.headers['content-type'] || 'application/octet-stream',
       etag,
-      modified:    Date.now(),
-      metadata:    extractMetadata(req.headers),
+      modified:       Date.now(),
+      metadata:       extractMetadata(req.headers),
+      versionId,
+      isDeleteMarker: false,
     };
+    bucket.objects[objectKey] = meta;
+    if (versioned) {
+      if (!bucket.objectVersions) bucket.objectVersions = {};
+      bucket.objectVersions[objectKey] = [meta, ...(bucket.objectVersions[objectKey] || [])];
+    }
     store.addTrail({ method: 'PUT', path: `/s3/${bucketName}/${objectKey}`, status: 200, latency: 2 });
-    res.writeHead(200, { 'ETag': `"${etag}"` });
+    const headers = { 'ETag': `"${etag}"` };
+    if (versioned) headers['x-amz-version-id'] = versionId;
+    res.writeHead(200, headers);
     res.end(); return;
   }
 
   // ── Delete object ───────────────────────────────────────────────────────
   if (method === 'DELETE' && objectKey) {
     if (!bucket) return s3Error(res, 404, 'NoSuchBucket', `No such bucket`);
+    const versionId = url.searchParams.get('versionId');
+    const history   = bucket.objectVersions?.[objectKey];
+
+    // Permanently remove one specific version.
+    if (versionId) {
+      if (history) {
+        const idx = history.findIndex(v => v.versionId === versionId);
+        if (idx !== -1) {
+          const [removed] = history.splice(idx, 1);
+          try { rmSync(versionDiskPath(bucketName, objectKey, versionId), { force: true }); } catch {}
+          if (history.length === 0) {
+            delete bucket.objectVersions[objectKey];
+            delete bucket.objects[objectKey];
+            try { rmSync(diskPath(bucketName, objectKey), { force: true }); } catch {}
+          } else if (idx === 0) {
+            // Deleted the head — promote the next version to current.
+            const head = history[0];
+            bucket.objects[objectKey] = head;
+            if (!head.isDeleteMarker) {
+              try { writeObjectToDisk(bucketName, objectKey, readObjectVersionFromDisk(bucketName, objectKey, head.versionId)); } catch {}
+            }
+          }
+          const headers = { 'x-amz-version-id': versionId };
+          if (removed?.isDeleteMarker) headers['x-amz-delete-marker'] = 'true';
+          res.writeHead(204, headers); res.end(); return;
+        }
+      }
+      res.writeHead(204, { 'x-amz-version-id': versionId }); res.end(); return;
+    }
+
+    // Versioning enabled: a plain DELETE inserts a delete marker (prior
+    // versions are retained) and becomes the new current head.
+    if (bucket.versioning === 'Enabled') {
+      const marker = { key: objectKey, isDeleteMarker: true, versionId: newVersionId(), modified: Date.now() };
+      if (!bucket.objectVersions) bucket.objectVersions = {};
+      bucket.objectVersions[objectKey] = [marker, ...(bucket.objectVersions[objectKey] || [])];
+      bucket.objects[objectKey] = marker;
+      store.addTrail({ method: 'DELETE', path: `/s3/${bucketName}/${objectKey}`, status: 204, latency: 1 });
+      res.writeHead(204, { 'x-amz-version-id': marker.versionId, 'x-amz-delete-marker': 'true' });
+      res.end(); return;
+    }
+
+    // Unversioned delete.
     delete bucket.objects[objectKey];
     try { rmSync(diskPath(bucketName, objectKey), { force: true }); } catch {}
     store.addTrail({ method: 'DELETE', path: `/s3/${bucketName}/${objectKey}`, status: 204, latency: 1 });
@@ -361,6 +482,26 @@ function readObjectFromDisk(bucket, key) {
   return readFileSync(diskPath(bucket, key));
 }
 
+// Historical object versions live in a sidecar dir so the current-head file at
+// <bucket>/<key> (read by GET-without-versionId and disk hydration) is left
+// untouched. walkObjects() skips the sidecar so it never becomes a phantom key.
+function versionDiskPath(bucket, key, versionId) {
+  const safeKey = key.split('/').map(p => p === '..' ? '__' : p).join('/');
+  return path.join(S3_ROOT, bucket, '.mockcloud-versions', safeKey, versionId);
+}
+
+function writeVersionToDisk(bucket, key, versionId, buf) {
+  const target = versionDiskPath(bucket, key, versionId);
+  mkdirSync(path.dirname(target), { recursive: true });
+  writeFileSync(target, buf);
+}
+
+function readObjectVersionFromDisk(bucket, key, versionId) {
+  return readFileSync(versionDiskPath(bucket, key, versionId));
+}
+
+function newVersionId() { return randomId(32); }
+
 function hydrateFromDisk() {
   if (!existsSync(S3_ROOT)) return;
   let bucketDirs;
@@ -385,6 +526,7 @@ function walkObjects(dir, prefix, out) {
   let entries;
   try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
   for (const e of entries) {
+    if (e.name === '.mockcloud-versions') continue;  // version sidecar, not a key
     if (e.name.includes('.tmp-')) continue;          // skip stale temp files
     const full = path.join(dir, e.name);
     const key  = prefix ? `${prefix}/${e.name}` : e.name;
