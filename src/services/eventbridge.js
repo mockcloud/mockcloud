@@ -153,6 +153,12 @@ async function deliverToTargets(rule, envelope) {
         }
         continue;
       }
+      if (target.Arn?.includes(':states:')) {
+        const { startStateMachineExecution } = await import('./stepfunctions.js').catch(() => ({}));
+        // EventBridge sends the matched event as the execution input.
+        startStateMachineExecution?.(target.Arn, JSON.stringify(envelope));
+        continue;
+      }
     } catch (e) {
       console.warn(`[EventBridge] Target delivery failed (${target.Arn}):`, e.message);
     }

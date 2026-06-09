@@ -23,6 +23,7 @@ const INITIAL_STATE = {
   cloudwatch:      () => ({ metrics: {}, alarms: {}, maxPoints: 1440 }),
   logs:            () => ({ groups: {} }),
   bedrock:         () => ({ defaultResponse: 'This is a canned MockCloud Bedrock response.', rules: [], invocations: [] }),
+  stepfunctions:   () => ({ stateMachines: {}, executions: {} }),
 };
 
 const SERVICE_KEYS = Object.keys(INITIAL_STATE);
