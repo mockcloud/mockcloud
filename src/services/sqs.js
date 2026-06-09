@@ -254,6 +254,7 @@ export function enqueueMessage(queueUrl, body, opts = {}) {
     visible:       true,
     dedupeId:      opts.dedupeId || null,
     approxReceiveCount: 0,
+    messageAttributes: opts.attributes || null,
   };
 
   if (q.type === 'fifo') {
@@ -276,6 +277,7 @@ export function enqueueMessage(queueUrl, body, opts = {}) {
   }
 
   q.messages.push(msg);
+  if (opts.delaySeconds > 0) setInvisible(msg, opts.delaySeconds * 1000);   // DelaySeconds
   return msg;
 }
 
@@ -341,15 +343,20 @@ function applyRedrive(q) {
 // Without cancellation the closure used to silently re-mark a deleted message
 // as visible (harmless if the queue was deleted, but it kept node alive in
 // tests and made invariants fuzzy).
-export function hideMessage(m, ms) {
-  m.visible = false;
-  m.approxReceiveCount = (m.approxReceiveCount || 0) + 1;
+// Re-arm a message's visibility timer without touching its receive count
+// (used by ChangeMessageVisibility and DelaySeconds). ms<=0 → visible now.
+function setInvisible(m, ms) {
   cancelVisibilityTimer(m);
-  m._visTimer = setTimeout(() => {
-    m.visible = true;
-    m._visTimer = null;
-  }, ms);
+  if (ms <= 0) { m.visible = true; return; }
+  m.visible = false;
+  m._visTimer = setTimeout(() => { m.visible = true; m._visTimer = null; }, ms);
   m._visTimer.unref?.();
+}
+
+// Deliver a message: bump the receive count, then hide it for the visibility window.
+export function hideMessage(m, ms) {
+  m.approxReceiveCount = (m.approxReceiveCount || 0) + 1;
+  setInvisible(m, ms);
 }
 
 export function cancelVisibilityTimer(m) {
@@ -370,6 +377,27 @@ export function removeAndCancel(messages, predicate) {
 
 function md5(str) {
   return crypto.createHash('md5').update(String(str)).digest('hex');
+}
+
+// AWS-canonical MD5 of message attributes: sorted names, each field length-
+// prefixed (4-byte BE), value tagged String(1)/Binary(2).
+function md5OfMessageAttributes(attrs) {
+  const enc = v => { const b = Buffer.from(String(v), 'utf8'); const len = Buffer.alloc(4); len.writeUInt32BE(b.length); return Buffer.concat([len, b]); };
+  const parts = [];
+  for (const name of Object.keys(attrs).sort()) {
+    const a = attrs[name];
+    const dataType = a.DataType || a.dataType || 'String';
+    parts.push(enc(name), enc(dataType));
+    const binary = a.BinaryValue ?? a.binaryValue;
+    if (binary != null) {
+      const bin = Buffer.isBuffer(binary) ? binary : Buffer.from(binary);
+      const len = Buffer.alloc(4); len.writeUInt32BE(bin.length);
+      parts.push(Buffer.from([2]), len, bin);
+    } else {
+      parts.push(Buffer.from([1]), enc(a.StringValue ?? a.stringValue ?? ''));
+    }
+  }
+  return crypto.createHash('md5').update(Buffer.concat(parts)).digest('hex');
 }
 
 function sqsWrap(respTag, resultTag, inner) {
