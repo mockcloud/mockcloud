@@ -24,6 +24,7 @@ const INITIAL_STATE = {
   logs:            () => ({ groups: {} }),
   bedrock:         () => ({ defaultResponse: 'This is a canned MockCloud Bedrock response.', rules: [], invocations: [] }),
   stepfunctions:   () => ({ stateMachines: {}, executions: {} }),
+  ses:             () => ({ emails: [], identities: {}, sent: 0, receiptRules: [] }),
 };
 
 const SERVICE_KEYS = Object.keys(INITIAL_STATE);
