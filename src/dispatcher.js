@@ -12,6 +12,7 @@ import { handler as ebHandler }     from './services/eventbridge.js';
 import { handler as ddbSHandler }   from './services/dynamodbstreams.js';
 import { handler as cwHandler }     from './services/cloudwatch.js';
 import { handler as logsHandler }   from './services/cloudwatchlogs.js';
+import { handler as bedrockHandler } from './services/bedrock.js';
 import './services/lambda-esm.js';  // side-effect: registers the SQS→Lambda poll tick
 
 const IAM_ACTIONS = new Set(['AssumeRole','GetCallerIdentity','GetSessionToken','CreateRole','DeleteRole','GetRole','ListRoles','ListRolePolicies','ListAttachedRolePolicies','ListRoleTags','CreatePolicy','AttachRolePolicy','DetachRolePolicy','PutRolePolicy','DeleteRolePolicy','CreateUser','GetUser','ListUsers','DeleteUser','CreateAccessKey','ListInstanceProfilesForRole','GetSessionToken']);
@@ -38,5 +39,6 @@ export function dispatchAWS(req, res) {
   if (EC2_ACTIONS.has(action))                                    return ec2Handler(req, res);
   if (SQS_ACTIONS.has(action) || target.startsWith('AmazonSQS.')) return sqsHandler(req, res);
   if (target.startsWith('GraniteServiceVersion20100801.'))        return cwHandler(req, res);
+  if (path.startsWith('/model/') || path.startsWith('/guardrail/')) return bedrockHandler(req, res);
   return s3Handler(req, res);
 }

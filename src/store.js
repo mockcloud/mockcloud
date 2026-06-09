@@ -22,6 +22,7 @@ const INITIAL_STATE = {
   dynamodbstreams: () => ({ shards: {}, triggers: {} }),
   cloudwatch:      () => ({ metrics: {}, alarms: {}, maxPoints: 1440 }),
   logs:            () => ({ groups: {} }),
+  bedrock:         () => ({ defaultResponse: 'This is a canned MockCloud Bedrock response.', rules: [], invocations: [] }),
 };
 
 const SERVICE_KEYS = Object.keys(INITIAL_STATE);

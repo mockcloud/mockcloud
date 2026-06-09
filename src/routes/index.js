@@ -11,6 +11,7 @@ import { registerIAMRoutes         } from './iam.js';
 import { registerTerminalRoutes    } from './terminal.js';
 import { registerEventBridgeRoutes } from './eventbridge.js';
 import { registerCloudWatchRoutes  } from './cloudwatch.js';
+import { registerBedrockRoutes     } from './bedrock.js';
 
 export function registerAllRoutes(app) {
   registerStatusRoutes(app);
@@ -25,4 +26,5 @@ export function registerAllRoutes(app) {
   registerTerminalRoutes(app);
   registerEventBridgeRoutes(app);
   registerCloudWatchRoutes(app);
+  registerBedrockRoutes(app);
 }
