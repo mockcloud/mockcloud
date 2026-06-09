@@ -21,6 +21,8 @@ export { VERSION };
 const PORT = parseInt(process.env.PORT || '4566');
 const UI_PORT = parseInt(process.env.UI_PORT || '4567');
 const HOST = process.env.HOST || '127.0.0.1';
+// Headless mode: skip the dashboard server (CI / API-only callers don't need it).
+const UI_ENABLED = !['true', '1', 'yes'].includes((process.env.MOCKCLOUD_DISABLE_UI || '').toLowerCase());
 
 // ── Body reader ────────────────────────────────────────────────────────────
 function readBody(req) {
@@ -96,12 +98,12 @@ awsServer.listen(PORT, HOST, () => {
   console.log(`\n  ╭─────────────────────────────────────────────────╮`);
   console.log(`  │   ☁  MockCloud  v${VERSION.padEnd(30)}│`);
   console.log(`  │   AWS API  →  http://${HOST}:${PORT}             │`);
-  console.log(`  │   Console  →  http://${HOST}:${UI_PORT}             │`);
+  if (UI_ENABLED) console.log(`  │   Console  →  http://${HOST}:${UI_PORT}             │`);
   console.log(`  │   github.com/mockcloud/mockcloud                │`);
   console.log(`  ╰─────────────────────────────────────────────────╯\n`);
 });
 
-uiServer.listen(UI_PORT, HOST);
+if (UI_ENABLED) uiServer.listen(UI_PORT, HOST);
 
-process.on('SIGTERM', () => { awsServer.close(); uiServer.close(); process.exit(0); });
-process.on('SIGINT', () => { awsServer.close(); uiServer.close(); process.exit(0); });
+process.on('SIGTERM', () => { awsServer.close(); if (UI_ENABLED) uiServer.close(); process.exit(0); });
+process.on('SIGINT',  () => { awsServer.close(); if (UI_ENABLED) uiServer.close(); process.exit(0); });

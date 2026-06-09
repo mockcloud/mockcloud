@@ -155,6 +155,9 @@ provider "aws" {
 | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for Docker) |
 | `MOCKCLOUD_S3_ROOT` | `~/.mockcloud/s3` | Where S3 object bytes are persisted |
 | `MOCKCLOUD_DYNAMODB_ROOT` | `~/.mockcloud/dynamodb` | Where DynamoDB tables are persisted |
+| `MOCKCLOUD_DISABLE_UI` | `false` | Skip the console UI server (headless / CI — only the API listens) |
+| `MOCKCLOUD_ENABLE_TERMINAL` | `false` | Enable the in-console shell. It runs host commands, so it's off by default; loopback binds only unless set to `force` |
+| `MOCKCLOUD_MAX_INTERNAL_INVOKES` | `200` | Re-entrancy cap: max internally-triggered (S3/SNS/EventBridge/Streams) Lambda invokes per 5s |
 
 ---
 
