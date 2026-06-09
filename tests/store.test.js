@@ -18,15 +18,12 @@ describe('store.reset', () => {
   });
 
   it('reset(service) restores only that service and preserves config defaults', () => {
-    store.ec2.mode = 'lite';
     store.ec2.instances['i-1'] = { id: 'i-1', state: 'running' };
     store.s3.buckets['keep'] = { name: 'keep', objects: {} };
 
     store.reset('ec2');
 
     assert.deepEqual(store.ec2.instances, {});
-    // mode reverts to factory default
-    assert.equal(store.ec2.mode, 'vmm');
     // other services untouched
     assert.ok(store.s3.buckets['keep']);
   });
@@ -53,14 +50,13 @@ describe('store.import (regression: shallow-merge used to leak prior state)', ()
 
     const snapshot = {
       version: 1,
-      ec2: { instances: { 'i-new': { id: 'i-new', state: 'running' } }, keyPairs: {}, securityGroups: {}, mode: 'lite' },
+      ec2: { instances: { 'i-new': { id: 'i-new', state: 'running' } }, keyPairs: {}, securityGroups: {} },
     };
     store.import(snapshot);
 
     assert.equal(store.ec2.instances['leftover'], undefined,
       'pre-import state must be cleared when the service is in the snapshot');
     assert.ok(store.ec2.instances['i-new']);
-    assert.equal(store.ec2.mode, 'lite');
   });
 
   it('services missing from the snapshot keep their current state', () => {
@@ -82,7 +78,7 @@ describe('store.import (regression: shallow-merge used to leak prior state)', ()
 describe('store.export', () => {
   it('emits valid JSON containing all registered services', () => {
     const snap = JSON.parse(store.export());
-    for (const k of ['s3', 'dynamodb', 'lambda', 'iam', 'sns', 'sqs', 'ec2', 'kms', 'ssm', 'eventbridge', 'cloudwatch', 'ses', 'stepfunctions', 'cognito']) {
+    for (const k of ['s3', 'dynamodb', 'lambda', 'iam', 'sns', 'sqs', 'ec2', 'eventbridge', 'cloudwatch']) {
       assert.ok(k in snap, `snapshot should include service "${k}"`);
     }
   });

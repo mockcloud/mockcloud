@@ -9,13 +9,8 @@ import { registerSQSRoutes         } from './sqs.js';
 import { registerSecretsRoutes     } from './secrets.js';
 import { registerIAMRoutes         } from './iam.js';
 import { registerTerminalRoutes    } from './terminal.js';
-import { registerKMSRoutes         } from './kms.js';
-import { registerSSMRoutes         } from './ssm.js';
 import { registerEventBridgeRoutes } from './eventbridge.js';
 import { registerCloudWatchRoutes  } from './cloudwatch.js';
-import { registerSESRoutes         } from './ses.js';
-import { registerStepFunctionsRoutes } from './stepfunctions.js';
-import { registerCognitoRoutes     } from './cognito.js';
 
 export function registerAllRoutes(app) {
   registerStatusRoutes(app);
@@ -28,11 +23,6 @@ export function registerAllRoutes(app) {
   registerSecretsRoutes(app);
   registerIAMRoutes(app);
   registerTerminalRoutes(app);
-  registerKMSRoutes(app);
-  registerSSMRoutes(app);
   registerEventBridgeRoutes(app);
   registerCloudWatchRoutes(app);
-  registerSESRoutes(app);
-  registerStepFunctionsRoutes(app);
-  registerCognitoRoutes(app);
 }

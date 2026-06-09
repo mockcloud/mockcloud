@@ -24,6 +24,7 @@ export async function handler(req, res) {
       const name = params.get('UserName');
       if (store.iam.users[name]) return errorXml(res, 409, 'EntityAlreadyExists', `User ${name} already exists`);
       store.iam.users[name] = { name, arn: arn('iam',`user/${name}`), created: Date.now(), groups:[], policies:[], mfa:false, accessKeys:[] };
+      store.addTrail({ method: 'POST', path: `/iam/CreateUser/${name}`, status: 200, latency: 2 });
       return xmlResponse(res, 200, wrap('CreateUserResponse','CreateUserResult', `<User><UserName>${escapeXml(name)}</UserName><Arn>${escapeXml(store.iam.users[name].arn)}</Arn><UserId>${randomId(20).toUpperCase()}</UserId></User>`));
     }
     case 'GetUser': {
@@ -33,7 +34,9 @@ export async function handler(req, res) {
       return xmlResponse(res, 200, wrap('GetUserResponse','GetUserResult', `<User><UserName>${escapeXml(u.name)}</UserName><Arn>${escapeXml(u.arn)}</Arn></User>`));
     }
     case 'DeleteUser': {
-      delete store.iam.users[params.get('UserName')];
+      const name = params.get('UserName');
+      delete store.iam.users[name];
+      store.addTrail({ method: 'POST', path: `/iam/DeleteUser/${name}`, status: 200, latency: 1 });
       return xmlResponse(res, 200, wrap('DeleteUserResponse','DeleteUserResult',''));
     }
     case 'ListUsers': {
@@ -48,6 +51,7 @@ export async function handler(req, res) {
       const a = arn('iam', `role/${name}`);
       const roleId = 'AROA' + randomId(16).toUpperCase();
       store.iam.roles[name] = { name, arn: a, roleId, path: params.get('Path') || '/', created: Date.now(), policies:[], trustPolicy: params.get('AssumeRolePolicyDocument'), attached: 0 };
+      store.addTrail({ method: 'POST', path: `/iam/CreateRole/${name}`, status: 200, latency: 2 });
       return xmlResponse(res, 200, wrap('CreateRoleResponse','CreateRoleResult', roleXml(store.iam.roles[name])));
     }
     case 'GetRole': {
@@ -57,7 +61,9 @@ export async function handler(req, res) {
       return xmlResponse(res, 200, wrap('GetRoleResponse','GetRoleResult', roleXml(r)));
     }
     case 'DeleteRole': {
-      delete store.iam.roles[params.get('RoleName')];
+      const name = params.get('RoleName');
+      delete store.iam.roles[name];
+      store.addTrail({ method: 'POST', path: `/iam/DeleteRole/${name}`, status: 200, latency: 1 });
       return xmlResponse(res, 200, wrap('DeleteRoleResponse','DeleteRoleResult',''));
     }
     case 'ListRoles': {
@@ -82,11 +88,14 @@ export async function handler(req, res) {
       if (!role) return errorXml(res, 404, 'NoSuchEntity', `Role ${name} not found`);
       const policyArn = params.get('PolicyArn');
       if (!role.policies.includes(policyArn)) role.policies.push(policyArn);
-      return xmlResponse(res, 200, wrap('AttachRolePolicyResponse','','')); 
+      store.addTrail({ method: 'POST', path: `/iam/AttachRolePolicy/${name}`, status: 200, latency: 1 });
+      return xmlResponse(res, 200, wrap('AttachRolePolicyResponse','',''));
     }
     case 'DetachRolePolicy': {
-      const role = store.iam.roles[params.get('RoleName')];
+      const name = params.get('RoleName');
+      const role = store.iam.roles[name];
       if (role) role.policies = role.policies.filter(p => p !== params.get('PolicyArn'));
+      store.addTrail({ method: 'POST', path: `/iam/DetachRolePolicy/${name}`, status: 200, latency: 1 });
       return xmlResponse(res, 200, wrap('DetachRolePolicyResponse','',''));
     }
     case 'CreateAccessKey': {

@@ -31,6 +31,7 @@ export async function handler(req, res) {
           type: name.endsWith('.fifo') ? 'fifo' : 'standard',
           attributes: {}, messages: [], created: Date.now(),
         };
+        store.addTrail({ method: 'POST', path: `/sqs/CreateQueue/${name}`, status: 200, latency: 2 });
       }
       return xmlResponse(res, 200, sqsWrap('CreateQueueResponse', 'CreateQueueResult', `<QueueUrl>${escapeXml(url)}</QueueUrl>`));
     }
@@ -46,7 +47,9 @@ export async function handler(req, res) {
     }
     case 'DeleteQueue': {
       const url = params.get('QueueUrl');
+      const qName = store.sqs.queues[url]?.name || url.split('/').pop();
       delete store.sqs.queues[url];
+      store.addTrail({ method: 'POST', path: `/sqs/DeleteQueue/${qName}`, status: 200, latency: 1 });
       return xmlResponse(res, 200, sqsWrap('DeleteQueueResponse','DeleteQueueResult',''));
     }
     case 'PurgeQueue': {
@@ -135,6 +138,7 @@ function handleJsonProtocol(req, res, action, payload) {
           type: name.endsWith('.fifo') ? 'fifo' : 'standard',
           attributes: payload.Attributes || {}, messages: [], created: Date.now(),
         };
+        store.addTrail({ method: 'POST', path: `/sqs/CreateQueue/${name}`, status: 200, latency: 2 });
       }
       return jsonResponse(res, 200, { QueueUrl: url });
     }
@@ -174,7 +178,9 @@ function handleJsonProtocol(req, res, action, payload) {
       return jsonResponse(res, 200, { QueueUrls: Object.keys(store.sqs.queues) });
     }
     case 'DeleteQueue': {
+      const qName = store.sqs.queues[payload.QueueUrl]?.name || payload.QueueUrl.split('/').pop();
       delete store.sqs.queues[payload.QueueUrl];
+      store.addTrail({ method: 'POST', path: `/sqs/DeleteQueue/${qName}`, status: 200, latency: 1 });
       return jsonResponse(res, 200, {});
     }
     case 'PurgeQueue': {

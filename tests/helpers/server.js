@@ -2,9 +2,10 @@
 // Spins up MockCloud's AWS handler on an ephemeral port for tests.
 // No UI server, no Docker probe, no banner — just the AWS dispatch layer.
 
+// test-env MUST be first — it sets MOCKCLOUD_S3_ROOT / MOCKCLOUD_DYNAMODB_ROOT
+// before the service modules below capture them at load time.
+import { TEST_S3_ROOT, TEST_DDB_ROOT } from './test-env.js';
 import http from 'http';
-import os from 'os';
-import path from 'path';
 import { mkdirSync, rmSync } from 'fs';
 import { store } from '../../src/store.js';
 import { Router } from '../../src/router.js';
@@ -19,15 +20,11 @@ function readBody(req) {
   });
 }
 
-// Give tests their own isolated S3 root so disk hydration doesn't bleed between runs
-const TEST_S3_ROOT = path.join(os.tmpdir(), `mockcloud-test-${process.pid}`);
-process.env.MOCKCLOUD_S3_ROOT = TEST_S3_ROOT;
+// Isolated storage roots (set in test-env.js) — create them up front.
 mkdirSync(TEST_S3_ROOT, { recursive: true });
+mkdirSync(TEST_DDB_ROOT, { recursive: true });
 
 export async function startServer() {
-  // Force EC2 to lite/simulated mode — no Docker dependency in tests
-  store.ec2.mode = 'lite';
-
   const apiRouter = new Router();
   registerAllRoutes(apiRouter);
 
@@ -54,10 +51,11 @@ export async function startServer() {
     port,
     resetStore() {
       store.reset();
-      store.ec2.mode = 'lite';
-      // Wipe the test S3 disk dir so hydration sees a clean slate
+      // Wipe the test S3 + DynamoDB disk dirs so hydration sees a clean slate
       try { rmSync(TEST_S3_ROOT, { recursive: true, force: true }); } catch {}
+      try { rmSync(TEST_DDB_ROOT, { recursive: true, force: true }); } catch {}
       mkdirSync(TEST_S3_ROOT, { recursive: true });
+      mkdirSync(TEST_DDB_ROOT, { recursive: true });
     },
     close() { return new Promise(resolve => server.close(resolve)); },
   };

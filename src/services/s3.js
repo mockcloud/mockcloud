@@ -72,6 +72,7 @@ export async function handler(req, res) {
       versioning: 'Suspended',
     };
     mkdirSync(path.join(S3_ROOT, bucketName), { recursive: true });
+    store.addTrail({ method: 'PUT', path: `/s3/${bucketName}`, status: 200, latency: 2 });
     res.setHeader('Location', `/${bucketName}`);
     return xmlResponse(res, 200, '');
   }
@@ -203,6 +204,7 @@ export async function handler(req, res) {
     }
     delete store.s3.buckets[bucketName];
     try { rmSync(path.join(S3_ROOT, bucketName), { recursive: true, force: true }); } catch {}
+    store.addTrail({ method: 'DELETE', path: `/s3/${bucketName}`, status: 204, latency: 1 });
     res.writeHead(204); res.end();
     return;
   }
@@ -283,6 +285,7 @@ export async function handler(req, res) {
       modified:    Date.now(),
       metadata:    extractMetadata(req.headers),
     };
+    store.addTrail({ method: 'PUT', path: `/s3/${bucketName}/${objectKey}`, status: 200, latency: 2 });
     res.writeHead(200, { 'ETag': `"${etag}"` });
     res.end(); return;
   }
@@ -292,6 +295,7 @@ export async function handler(req, res) {
     if (!bucket) return s3Error(res, 404, 'NoSuchBucket', `No such bucket`);
     delete bucket.objects[objectKey];
     try { rmSync(diskPath(bucketName, objectKey), { force: true }); } catch {}
+    store.addTrail({ method: 'DELETE', path: `/s3/${bucketName}/${objectKey}`, status: 204, latency: 1 });
     res.writeHead(204); res.end(); return;
   }
 

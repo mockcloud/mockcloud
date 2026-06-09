@@ -4,7 +4,6 @@
 
 import { EC2Client } from '@aws-sdk/client-ec2';
 import { S3Client } from '@aws-sdk/client-s3';
-import { ApiGatewayV2Client } from '@aws-sdk/client-apigatewayv2';
 
 const DUMMY_CREDS = {
   credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
@@ -15,6 +14,5 @@ export function makeClients(endpoint) {
   return {
     ec2: new EC2Client({ ...DUMMY_CREDS, endpoint }),
     s3:  new S3Client({ ...DUMMY_CREDS, endpoint, forcePathStyle: true }),
-    agv2: new ApiGatewayV2Client({ ...DUMMY_CREDS, endpoint }),
   };
 }

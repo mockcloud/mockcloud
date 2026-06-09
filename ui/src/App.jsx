@@ -6,8 +6,7 @@ import {
   HomePage, EC2Page, S3Page, LambdaPage, DynamoPage,
   SNSPage, SQSPage, SecretsPage, IAMPage,
   WatchPage, TrailPage, BillingPage, TerminalPage,
-  KMSPage, SSMPage, EventBridgePage, SESPage,
-  StepFunctionsPage, CognitoPage,
+  EventBridgePage,
 } from './pages/index.js';
 import { api } from './api.js';
 
@@ -71,11 +70,6 @@ export default function App() {
     sqs:         status?.stats?.sqsQueues       || undefined,
     eventbridge: status?.stats?.ebRules         || undefined,
     secrets:     status?.stats?.secrets         || undefined,
-    kms:         status?.stats?.kmsKeys         || undefined,
-    ssm:         status?.stats?.ssmParameters   || undefined,
-    ses:         status?.stats?.sesEmails       || undefined,
-    sfn:         status?.stats?.sfnMachines     || undefined,
-    cognito:     status?.stats?.cognitoPools    || undefined,
     watch:       status?.stats?.cwMetrics       || undefined,
     trail:       trail.length                   || undefined,
   };
@@ -96,12 +90,7 @@ export default function App() {
       case 'trail':       return <TrailPage events={trail} />;
       case 'billing':     return <BillingPage pushToast={pushToast} />;
       case 'terminal':    return <TerminalPage target={terminalTarget} pushToast={pushToast} onBack={() => setPage(terminalTarget?.type === 'ec2' ? 'ec2' : 'home')} />;
-      case 'kms':         return <KMSPage {...p} />;
-      case 'ssm':         return <SSMPage {...p} />;
       case 'eventbridge': return <EventBridgePage {...p} />;
-      case 'ses':         return <SESPage {...p} />;
-      case 'sfn':         return <StepFunctionsPage {...p} />;
-      case 'cognito':     return <CognitoPage {...p} />;
       default:            return <HomePage {...p} setCurrent={setPage} setTerminalTarget={setTerminalTarget} />;
     }
   }

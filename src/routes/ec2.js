@@ -26,7 +26,7 @@ export function registerEC2Routes(app) {
     jsonResponse(res, 200, { instances: Object.values(store.ec2.instances) });
   });
 
-  app.post('/mockcloud/ec2/instances', async (req, res) => {
+  app.post('/mockcloud/ec2/instances', (req, res) => {
     const { name, type, ami, assignPublicIp } = body(req);
     const id = `i-${randomId(8)}`;
     const specs = TYPE_SPECS[type] || { vcpu: 1, mem: 1 };
@@ -44,66 +44,25 @@ export function registerEC2Routes(app) {
       vcpu: specs.vcpu,
       mem: specs.mem,
       launched: Date.now(),
-      containerId: null,
-      containerStatus: 'n/a',
     };
     store.ec2.instances[id] = instance;
 
-    // Lite mode — simulated only, no Docker
-    if (store.ec2.mode === 'lite') {
-      setTimeout(() => { if (store.ec2.instances[id]) store.ec2.instances[id].state = 'running'; }, 500);
-    } else {
-      // VMM mode — try Docker. If it fails, this instance falls back to
-      // simulated AND we flip the global mode to lite so subsequent launches
-      // don't keep hitting the dead daemon. The next status poll surfaces
-      // dockerAvailable=false to the UI which then re-renders the toggle.
-      try {
-        const { spawnDockerContainer } = await import('../services/docker.js');
-        const containerId = await spawnDockerContainer(instance);
-        instance.containerId = containerId;
-        instance.containerStatus = 'running';
-        instance.state = 'running';
-      } catch (e) {
-        const reason = e.message.split('\n')[0];
-        console.log(`[EC2] Docker unavailable (${reason}); falling back to simulated mode`);
-        store.ec2.mode = 'lite';
-        instance.fallbackReason = reason;
-        setTimeout(() => { if (store.ec2.instances[id]) store.ec2.instances[id].state = 'running'; }, 2000);
-        // Bust the docker-health cache so the next /status poll reports the
-        // new reality immediately rather than serving the stale "ok" value.
-        try {
-          const { invalidateDockerCache } = await import('../services/docker-health.js');
-          invalidateDockerCache();
-        } catch { }
-      }
-    }
+    setTimeout(() => { if (store.ec2.instances[id]) store.ec2.instances[id].state = 'running'; }, 500);
 
     store.addTrail({ method: 'POST', path: '/ec2/instances', status: 201, latency: 8 });
     jsonResponse(res, 201, instance);
   });
 
-  app.post('/mockcloud/ec2/instances/:id/action', async (req, res) => {
+  app.post('/mockcloud/ec2/instances/:id/action', (req, res) => {
     const { action } = body(req);
     const inst = store.ec2.instances[req.params.id];
     if (!inst) return errorJson(res, 404, 'NotFound', 'Instance not found');
-
-    if (inst.containerId) {
-      try {
-        const { dockerAction } = await import('../services/docker.js');
-        await dockerAction(inst.containerId, action);
-      } catch (e) {
-        console.log(`[EC2] Docker action failed: ${e.message.split('\n')[0]}`);
-      }
-    }
 
     if (action === 'stop') inst.state = 'stopped';
     else if (action === 'start') { inst.state = 'pending'; setTimeout(() => { if (inst) inst.state = 'running'; }, 2000); }
     else if (action === 'reboot') { inst.state = 'pending'; setTimeout(() => { if (inst) inst.state = 'running'; }, 1000); }
     else if (action === 'terminate') {
       inst.state = 'terminated';
-      if (inst.containerId) {
-        try { const { dockerAction } = await import('../services/docker.js'); await dockerAction(inst.containerId, 'terminate'); } catch { }
-      }
       setTimeout(() => delete store.ec2.instances[req.params.id], 5000);
     }
 
@@ -111,12 +70,9 @@ export function registerEC2Routes(app) {
     jsonResponse(res, 200, { id: req.params.id, action, state: inst.state });
   });
 
-  app.delete('/mockcloud/ec2/instances/:id', async (req, res) => {
+  app.delete('/mockcloud/ec2/instances/:id', (req, res) => {
     const inst = store.ec2.instances[req.params.id];
     if (!inst) return errorJson(res, 404, 'NotFound', 'Instance not found');
-    if (inst.containerId) {
-      try { const { dockerAction } = await import('../services/docker.js'); await dockerAction(inst.containerId, 'terminate'); } catch { }
-    }
     delete store.ec2.instances[req.params.id];
     store.addTrail({ method: 'DELETE', path: `/ec2/${req.params.id}`, status: 200, latency: 1 });
     jsonResponse(res, 200, { terminated: req.params.id });

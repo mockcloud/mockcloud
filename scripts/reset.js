@@ -51,6 +51,4 @@ async function confirm(prompt) {
 
   const data = await r.json().catch(() => ({}));
   console.log(`✓ Reset complete (${data.reset || 'all'})`);
-  if (data.dockerTerminated) console.log(`  Docker containers terminated: ${data.dockerTerminated}`);
-  if (data.dockerErrors)     console.log(`  Docker termination errors:    ${data.dockerErrors}`);
 })();
