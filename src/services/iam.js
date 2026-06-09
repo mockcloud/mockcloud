@@ -99,10 +99,14 @@ export async function handler(req, res) {
       return xmlResponse(res, 200, wrap('DetachRolePolicyResponse','',''));
     }
     case 'CreateAccessKey': {
-      const user = store.iam.users[params.get('UserName')];
+      const userName = params.get('UserName');
+      const user = store.iam.users[userName];
       const key = { AccessKeyId: 'AKIA'+randomId(16).toUpperCase(), SecretAccessKey: randomId(40), Status: 'Active', Created: Date.now() };
       if (user) user.accessKeys.push(key);
-      return xmlResponse(res, 200, wrap('CreateAccessKeyResponse','CreateAccessKeyResult', `<AccessKey><AccessKeyId>${key.AccessKeyId}</AccessKeyId><SecretAccessKey>${key.SecretAccessKey}</SecretAccessKey><Status>Active</Status></AccessKey>`));
+      // Register the credential so opt-in SigV4 verification can validate it.
+      store.iam.accessKeys[key.AccessKeyId] = key.SecretAccessKey;
+      if (userName) store.iam.accessKeyOwners = { ...(store.iam.accessKeyOwners || {}), [key.AccessKeyId]: userName };
+      return xmlResponse(res, 200, wrap('CreateAccessKeyResponse','CreateAccessKeyResult', `<AccessKey><UserName>${escapeXml(userName||'')}</UserName><AccessKeyId>${key.AccessKeyId}</AccessKeyId><SecretAccessKey>${key.SecretAccessKey}</SecretAccessKey><Status>Active</Status></AccessKey>`));
     }
 
     default:

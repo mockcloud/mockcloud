@@ -13,7 +13,11 @@ const INITIAL_STATE = {
   s3:              () => ({ buckets: {} }),
   dynamodb:        () => ({ tables: {} }),
   lambda:          () => ({ functions: {} }),
-  iam:             () => ({ users: {}, roles: {}, policies: {} }),
+  // accessKeys maps accessKeyId → secretAccessKey for opt-in SigV4 verification
+  // (MOCKCLOUD_VERIFY_SIGV4). Seeded with the dummy creds the CLI/SDKs use
+  // locally; CreateAccessKey adds more. identityPolicies maps a principal
+  // (username) → [policy documents] for opt-in IAM evaluation (MOCKCLOUD_IAM).
+  iam:             () => ({ users: {}, roles: {}, policies: {}, accessKeys: { local: 'local', test: 'test' }, identityPolicies: {} }),
   sns:             () => ({ topics: {} }),
   sqs:             () => ({ queues: {} }),
   secretsmanager:  () => ({ secrets: {} }),

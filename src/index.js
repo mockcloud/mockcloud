@@ -8,6 +8,7 @@ import { Router } from './router.js';
 import { dispatchAWS } from './dispatcher.js';
 import { registerAllRoutes } from './routes/index.js';
 import { sendInternalError } from './middleware/response.js';
+import { sigv4Enabled, verifySigV4, sendSigV4Error } from './middleware/sigv4.js';
 import { startBackground, stopBackground } from './lifecycle.js';
 import { VERSION } from './version.js';
 
@@ -59,7 +60,15 @@ const awsServer = http.createServer(async (req, res) => {
   // socket (which breaks SDK retry/timeout behaviour).
   try {
     const matched = await apiRouter.dispatch(req, res);
-    if (!matched) await dispatchAWS(req, res);
+    if (!matched) {
+      // Opt-in SigV4 verification (off by default). /mockcloud routes are
+      // internal and exempt — they're handled by the router above.
+      if (sigv4Enabled()) {
+        const authErr = verifySigV4(req);
+        if (authErr) return sendSigV4Error(req, res, authErr);
+      }
+      await dispatchAWS(req, res);
+    }
   } catch (err) {
     sendInternalError(req, res, err);
   }
