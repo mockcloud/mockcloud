@@ -95,8 +95,8 @@ export function createSession(type, instanceId) {
   }
 
   sessions.set(id, session);
-  // Auto-expire after 30 min
-  setTimeout(() => { if (sessions.has(id)) { closeSession(id); } }, 30 * 60 * 1000);
+  // Auto-expire after 30 min (don't keep the event loop alive for it)
+  setTimeout(() => { if (sessions.has(id)) { closeSession(id); } }, 30 * 60 * 1000).unref?.();
   return id;
 }
 

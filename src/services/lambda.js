@@ -261,9 +261,26 @@ function handleEventSourceMappings(req, res, parts, method, payload) {
 //
 // Returns { result: string|null, duration: number, error: string|null, requestId }.
 // Always resolves; never throws.
+//
+// Re-entrancy guard: internally-triggered invocations (S3 / SNS / EventBridge /
+// Streams — any source other than a direct API Invoke) are capped per rolling
+// window so a Lambda → S3 → Lambda style loop can't run unbounded. Configurable
+// via MOCKCLOUD_MAX_INTERNAL_INVOKES (default 200 per 5s).
+const REENTRY_CAP = Math.max(1, parseInt(process.env.MOCKCLOUD_MAX_INTERNAL_INVOKES || '200', 10) || 200);
+let _reentryWindow = { start: 0, count: 0 };
+function internalBudgetExceeded(source) {
+  if (!source || source === 'aws-api') return false;   // direct user Invoke is never capped
+  const now = Date.now();
+  if (now - _reentryWindow.start > 5000) _reentryWindow = { start: now, count: 0 };
+  return ++_reentryWindow.count > REENTRY_CAP;
+}
+
 export async function invokeLambda(fnName, event, opts = {}) {
-  const fn = store.lambda.functions[fnName];
   const requestId = opts.requestId || randomId(36);
+  if (internalBudgetExceeded(opts.source)) {
+    return { result: null, duration: 0, error: 'MockCloud re-entrancy guard: internal invocation budget exceeded (possible event loop)', requestId };
+  }
+  const fn = store.lambda.functions[fnName];
   if (!fn) return { result: null, duration: 0, error: `Function not found: ${fnName}`, requestId };
 
   const start  = Date.now();
@@ -378,6 +395,26 @@ function extractZip(buf) {
   }
 }
 
+// Minimal environment for the sandbox. We deliberately do NOT forward the full
+// host process.env — that would leak the operator's AWS credentials, tokens and
+// other secrets into arbitrary user code. Only OS essentials (so `node` can
+// start) plus standard Lambda vars and the function's own Environment.Variables.
+const OS_ENV_PASSTHROUGH = ['PATH', 'PATHEXT', 'SystemRoot', 'windir', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'LANG', 'LC_ALL'];
+function lambdaEnv(fn) {
+  const env = {};
+  for (const k of OS_ENV_PASSTHROUGH) if (process.env[k] !== undefined) env[k] = process.env[k];
+  Object.assign(env, {
+    AWS_REGION:                      process.env.AWS_REGION || 'us-east-1',
+    AWS_DEFAULT_REGION:              process.env.AWS_DEFAULT_REGION || 'us-east-1',
+    AWS_LAMBDA_FUNCTION_NAME:        fn.name,
+    AWS_LAMBDA_FUNCTION_VERSION:     '$LATEST',
+    AWS_LAMBDA_FUNCTION_MEMORY_SIZE: String(fn.memory || 128),
+    AWS_EXECUTION_ENV:               `AWS_Lambda_${fn.runtime || 'nodejs'}`,
+    _HANDLER:                        fn.handler || 'index.handler',
+  }, fn.env || {});
+  return env;
+}
+
 function runInNodeSandbox(fn, payload) {
   return new Promise((resolve, reject) => {
     const tmpDir = path.join(tmpdir(), `mockcloud-lambda-${randomId(8)}`);
@@ -402,7 +439,7 @@ Promise.resolve(handler(event, {})).then(r => {
 `;
       writeFileSync(path.join(tmpDir, 'runner.js'), runner);
       const timeoutMs = Math.max(1000, (fn.timeout || 3) * 1000);
-      execFile('node', ['runner.js', payload], { cwd: tmpDir, timeout: timeoutMs, env: { ...process.env, ...fn.env } }, (err, stdout, stderr) => {
+      execFile('node', ['runner.js', payload], { cwd: tmpDir, timeout: timeoutMs, env: lambdaEnv(fn) }, (err, stdout, stderr) => {
         try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
         if (err) return reject(new Error(stderr || err.message));
         resolve(stdout || 'null');
