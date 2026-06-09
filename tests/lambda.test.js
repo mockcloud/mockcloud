@@ -3,7 +3,7 @@
 // sub-resources to lock in the regression where a broad GET catch-all was
 // shadowing them and returning 404 for everything.
 
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { describe, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import assert from 'node:assert/strict';
 import { startServer } from './helpers/server.js';
 import { lambdaJson } from './helpers/http.js';
@@ -11,8 +11,8 @@ import { lambdaJson } from './helpers/http.js';
 let server;
 const lambda = (method, path, payload, headers) => lambdaJson(server.endpoint, method, path, payload, headers);
 
-before(async () => { server = await startServer(); });
-after(() => server.close());
+beforeAll(async () => { server = await startServer(); });
+afterAll(() => server.close());
 beforeEach(() => server.resetStore());
 
 const FN_BASE = '/2015-03-31/functions';

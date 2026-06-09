@@ -2,7 +2,7 @@
 // Exercises the DynamoDB JSON protocol (DynamoDB_20120810.*) directly so the
 // test doesn't depend on a separately-installed @aws-sdk/client-dynamodb.
 
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { describe, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import assert from 'node:assert/strict';
 import { startServer } from './helpers/server.js';
 import { awsJson } from './helpers/http.js';
@@ -24,8 +24,8 @@ async function rest(method, path, body) {
   return { status: res.status, body: parsed };
 }
 
-before(async () => { server = await startServer(); });
-after(() => server.close());
+beforeAll(async () => { server = await startServer(); });
+afterAll(() => server.close());
 beforeEach(() => server.resetStore());
 
 describe('Table CRUD', () => {

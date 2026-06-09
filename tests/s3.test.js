@@ -1,5 +1,5 @@
 // tests/s3.test.js
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { describe, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import assert from 'node:assert/strict';
 import {
   CreateBucketCommand,
@@ -31,12 +31,12 @@ let server, s3;
 let bucketCounter = 0;
 function freshBucket() { return `test-bucket-${Date.now()}-${++bucketCounter}`; }
 
-before(async () => {
+beforeAll(async () => {
   server = await startServer();
   ({ s3 } = makeClients(server.endpoint));
 });
 
-after(() => server.close());
+afterAll(() => server.close());
 beforeEach(() => server.resetStore());
 
 // ── Bucket basics ────────────────────────────────────────────────────────────

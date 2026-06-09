@@ -6,8 +6,12 @@
 import os from 'os';
 import path from 'path';
 
-export const TEST_S3_ROOT  = path.join(os.tmpdir(), `mockcloud-test-${process.pid}`);
-export const TEST_DDB_ROOT = path.join(os.tmpdir(), `mockcloud-ddb-test-${process.pid}`);
+// Disk roots are unique per worker. Under vitest's `forks` pool each test file
+// runs in its own process (distinct pid); VITEST_POOL_ID adds extra safety if a
+// worker process is ever reused. Outside vitest it falls back to just the pid.
+const WORKER = `${process.pid}-${process.env.VITEST_POOL_ID ?? '0'}`;
+export const TEST_S3_ROOT  = path.join(os.tmpdir(), `mockcloud-test-${WORKER}`);
+export const TEST_DDB_ROOT = path.join(os.tmpdir(), `mockcloud-ddb-test-${WORKER}`);
 
 process.env.MOCKCLOUD_S3_ROOT       = TEST_S3_ROOT;
 process.env.MOCKCLOUD_DYNAMODB_ROOT = TEST_DDB_ROOT;

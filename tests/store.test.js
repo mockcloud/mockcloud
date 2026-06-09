@@ -2,7 +2,7 @@
 // Direct unit tests for store.js — covers the snapshot-import regression
 // (shallow merge used to leak prior state) and the reset behaviour.
 
-import { describe, it, beforeEach } from 'node:test';
+import { describe, it, beforeEach } from 'vitest';
 import assert from 'node:assert/strict';
 import { store } from '../src/store.js';
 
