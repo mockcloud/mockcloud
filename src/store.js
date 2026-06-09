@@ -21,6 +21,7 @@ const INITIAL_STATE = {
   eventbridge:     () => ({ buses: { default: { name: 'default', rules: {} } }, events: [] }),
   dynamodbstreams: () => ({ shards: {}, triggers: {} }),
   cloudwatch:      () => ({ metrics: {}, alarms: {}, maxPoints: 1440 }),
+  logs:            () => ({ groups: {} }),
 };
 
 const SERVICE_KEYS = Object.keys(INITIAL_STATE);

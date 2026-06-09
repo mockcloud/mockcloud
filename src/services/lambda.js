@@ -11,6 +11,7 @@
 // or a downstream service (SNS subscription, EventBridge target, DDB stream).
 import { store, randomId, arn } from '../store.js';
 import { jsonResponse, errorJson, getRawBody } from '../middleware/response.js';
+import { putLogEvent } from './cloudwatchlogs.js';
 import { execFile } from 'child_process';
 import { writeFileSync, mkdirSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
@@ -287,9 +288,14 @@ export async function invokeLambda(fnName, event, opts = {}) {
   fn.invocations++;
   fn.lastInvoked = Date.now();
 
+  // Stream execution logs to CloudWatch Logs at /aws/lambda/<fn> so
+  // `aws logs tail` / FilterLogEvents work like real Lambda.
+  const logGroup  = `/aws/lambda/${fn.name}`;
+  const logStream = `${new Date().toISOString().slice(0, 10).replace(/-/g, '/')}/[$LATEST]${requestId}`;
   const log = (level, msg) => {
     fn.logs.unshift({ t: Date.now(), level, msg });
     if (fn.logs.length > 200) fn.logs.length = 200;
+    try { putLogEvent(logGroup, logStream, `[${level}] ${msg}`); } catch {}
   };
   log('INFO', `START RequestId: ${requestId} Source: ${opts.source || 'unknown'}`);
 

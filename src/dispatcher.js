@@ -11,6 +11,7 @@ import { handler as smHandler }     from './services/secretsmanager.js';
 import { handler as ebHandler }     from './services/eventbridge.js';
 import { handler as ddbSHandler }   from './services/dynamodbstreams.js';
 import { handler as cwHandler }     from './services/cloudwatch.js';
+import { handler as logsHandler }   from './services/cloudwatchlogs.js';
 import './services/lambda-esm.js';  // side-effect: registers the SQS→Lambda poll tick
 
 const IAM_ACTIONS = new Set(['AssumeRole','GetCallerIdentity','GetSessionToken','CreateRole','DeleteRole','GetRole','ListRoles','ListRolePolicies','ListAttachedRolePolicies','ListRoleTags','CreatePolicy','AttachRolePolicy','DetachRolePolicy','PutRolePolicy','DeleteRolePolicy','CreateUser','GetUser','ListUsers','DeleteUser','CreateAccessKey','ListInstanceProfilesForRole','GetSessionToken']);
@@ -27,6 +28,7 @@ export function dispatchAWS(req, res) {
   const action = url.searchParams.get('Action') || params.get('Action') || '';
 
   if (target.startsWith('AmazonEventBridge.') || target.startsWith('AWSEvents.')) return ebHandler(req, res);
+  if (target.startsWith('Logs_20140328.'))                        return logsHandler(req, res);
   if (target.startsWith('DynamoDBStreams_'))                      return ddbSHandler(req, res);
   if (target.startsWith('DynamoDB_'))                             return dynamoHandler(req, res);
   if (target.startsWith('AWSLambda') || path.startsWith('/2015-03-31/functions') || path.startsWith('/2015-03-31/event-source-mappings') || path.startsWith('/2020-06-30/functions') || path.startsWith('/2020-06-30/event-source-mappings')) return lambdaHandler(req, res);
