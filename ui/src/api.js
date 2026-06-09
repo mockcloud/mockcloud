@@ -1,5 +1,14 @@
 // api.js — MockCloud internal REST API client
-const BASE = `http://${window.location.hostname}:4566/mockcloud`;
+//
+// In Vite dev the app is served by the dev server (whatever port it picks),
+// which proxies /mockcloud → :4566 (see vite.config.js). Using a RELATIVE base
+// there keeps every call same-origin, so it works regardless of the dev port
+// and needs no CORS. In a production build the UI is served by the daemon's UI
+// server on :4567 and must call the API on :4566 directly — that cross-origin
+// is allowlisted in src/middleware/http.js.
+const BASE = import.meta.env.DEV
+  ? '/mockcloud'
+  : `http://${window.location.hostname}:4566/mockcloud`;
 
 async function req(method, path, body) {
   const opts = { method, headers: {} };
@@ -125,6 +134,6 @@ export const api = {
     exec: (s, cmd) => post(`/terminal/sessions/${s}/exec`, { command: cmd }),
     interrupt: (s) => post(`/terminal/sessions/${s}/interrupt`, {}),
     close: (s) => del(`/terminal/sessions/${s}`),
-    streamUrl: (s) => `http://127.0.0.1:4566/mockcloud/terminal/sessions/${s}/stream`,
+    streamUrl: (s) => `${BASE}/terminal/sessions/${s}/stream`,
   },
 };
