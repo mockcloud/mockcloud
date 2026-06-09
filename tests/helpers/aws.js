@@ -8,6 +8,8 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { SNSClient } from '@aws-sdk/client-sns';
 import { LambdaClient } from '@aws-sdk/client-lambda';
+import { CloudWatchClient } from '@aws-sdk/client-cloudwatch';
+import { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 
 const DUMMY_CREDS = {
   credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
@@ -22,5 +24,7 @@ export function makeClients(endpoint) {
     sqs:    new SQSClient({ ...DUMMY_CREDS, endpoint }),
     sns:    new SNSClient({ ...DUMMY_CREDS, endpoint }),
     lambda: new LambdaClient({ ...DUMMY_CREDS, endpoint }),
+    cw:     new CloudWatchClient({ ...DUMMY_CREDS, endpoint }),
+    logs:   new CloudWatchLogsClient({ ...DUMMY_CREDS, endpoint }),
   };
 }

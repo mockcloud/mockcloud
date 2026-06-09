@@ -40,6 +40,8 @@
     "offline"
   ],
   "devDependencies": {
+    "@aws-sdk/client-cloudwatch": "^3.1045.0",
+    "@aws-sdk/client-cloudwatch-logs": "^3.1045.0",
     "@aws-sdk/client-dynamodb": "^3.1045.0",
     "@aws-sdk/client-ec2": "^3.1045.0",
     "@aws-sdk/client-lambda": "^3.1045.0",

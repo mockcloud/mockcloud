@@ -10,12 +10,13 @@ import { handler as ec2Handler }    from './services/ec2.js';
 import { handler as smHandler }     from './services/secretsmanager.js';
 import { handler as ebHandler }     from './services/eventbridge.js';
 import { handler as ddbSHandler }   from './services/dynamodbstreams.js';
+import { handler as cwHandler }     from './services/cloudwatch.js';
 import './services/lambda-esm.js';  // side-effect: registers the SQS→Lambda poll tick
 
 const IAM_ACTIONS = new Set(['AssumeRole','GetCallerIdentity','GetSessionToken','CreateRole','DeleteRole','GetRole','ListRoles','ListRolePolicies','ListAttachedRolePolicies','ListRoleTags','CreatePolicy','AttachRolePolicy','DetachRolePolicy','PutRolePolicy','DeleteRolePolicy','CreateUser','GetUser','ListUsers','DeleteUser','CreateAccessKey','ListInstanceProfilesForRole','GetSessionToken']);
 const EC2_ACTIONS = new Set(['RunInstances','DescribeInstances','DescribeInstanceStatus','DescribeInstanceAttribute','TerminateInstances','StopInstances','StartInstances','CreateSecurityGroup','DescribeSecurityGroups','DeleteSecurityGroup','AuthorizeSecurityGroupIngress','AuthorizeSecurityGroupEgress','RevokeSecurityGroupIngress','RevokeSecurityGroupEgress','CreateKeyPair','DescribeKeyPairs','DeleteKeyPair','ImportKeyPair','DescribeImages','DescribeAvailabilityZones','DescribeRegions','DescribeVpcs','DescribeSubnets','DescribeInternetGateways','DescribeRouteTables','DescribeInstanceTypes','CreateTags','DescribeSecurityGroupRules']);
 const SQS_ACTIONS = new Set(['CreateQueue','GetQueueUrl','ListQueues','DeleteQueue','SendMessage','ReceiveMessage','DeleteMessage','GetQueueAttributes','SetQueueAttributes','PurgeQueue']);
-const SNS_ACTIONS = new Set(['CreateTopic','DeleteTopic','ListTopics','Subscribe','Unsubscribe','Publish','ListSubscriptions']);
+const SNS_ACTIONS = new Set(['CreateTopic','DeleteTopic','ListTopics','Subscribe','Unsubscribe','Publish','ListSubscriptions','PublishBatch','SetSubscriptionAttributes','GetSubscriptionAttributes','ListSubscriptionsByTopic','GetTopicAttributes','SetTopicAttributes']);
 
 export function dispatchAWS(req, res) {
   const url    = new URL(req.url, 'http://localhost');
@@ -34,5 +35,6 @@ export function dispatchAWS(req, res) {
   if (IAM_ACTIONS.has(action))                                    return iamHandler(req, res);
   if (EC2_ACTIONS.has(action))                                    return ec2Handler(req, res);
   if (SQS_ACTIONS.has(action) || target.startsWith('AmazonSQS.')) return sqsHandler(req, res);
+  if (target.startsWith('GraniteServiceVersion20100801.'))        return cwHandler(req, res);
   return s3Handler(req, res);
 }
