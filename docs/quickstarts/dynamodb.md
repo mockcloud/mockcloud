@@ -17,6 +17,7 @@ are written to disk, so they survive a restart.**
 git clone https://github.com/mockcloud/mockcloud
 cd mockcloud
 npm install
+npm --prefix ui install && npm run ui:build   # build the console UI
 npm start
 ```
 
@@ -31,9 +32,11 @@ Console  →  http://127.0.0.1:4567
 
 ## 2. Connect
 
-MockCloud performs **no** credential or SigV4 validation — any dummy values are
-accepted. The only thing that matters is the `endpoint` override pointing at
-`http://127.0.0.1:4566`.
+By default MockCloud performs **no** credential or SigV4 validation — any dummy
+values are accepted. The only thing that matters is the `endpoint` override
+pointing at `http://127.0.0.1:4566`. (Validation can be opted into with
+`MOCKCLOUD_VERIFY_SIGV4=true` and `MOCKCLOUD_IAM=soft|strict` — see the main
+README's env-var table.)
 
 ### AWS CLI
 

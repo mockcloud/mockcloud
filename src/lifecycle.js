@@ -3,9 +3,9 @@
 // interval keeps the process (or a vitest `forks` worker) alive forever.
 //
 // Feature modules register a tick with `registerTick(fn)` (at import time);
-// `startBackground()` runs every registered tick on an interval. Tests can call
-// `runTicksOnce()` (or a feature's own exported `*Once()` fn) for deterministic,
-// sleep-free assertions.
+// `startBackground()` runs every registered tick on an interval. Tests call a
+// feature's own exported `*Once()` fn (e.g. eventbridge's fireDueSchedulesOnce)
+// for deterministic, sleep-free assertions.
 
 const ticks = [];
 let timer = null;
@@ -17,7 +17,7 @@ export function registerTick(fn) {
   if (typeof fn === 'function' && !ticks.includes(fn)) ticks.push(fn);
 }
 
-export function runTicksOnce() {
+function runTicksOnce() {
   for (const fn of ticks) {
     try { fn(); } catch (e) { console.warn('[lifecycle] tick failed:', e.message); }
   }

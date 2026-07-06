@@ -1,5 +1,5 @@
 // services/stepfunctions.js — AWS Step Functions emulator
-import { store, randomId, arn } from '../store.js';
+import { store, randomId, arn, iamArn } from '../store.js';
 import { jsonResponse, errorJson } from '../middleware/response.js';
 
 function parseBody(req) {
@@ -38,7 +38,7 @@ function createStateMachine(req, res) {
     name:       b.name,
     arn:        smArn,
     definition: b.definition || '{}',
-    roleArn:    b.roleArn || arn('iam', 'role/StatesRole'),
+    roleArn:    b.roleArn || iamArn('role/StatesRole'),
     type:       b.type || 'STANDARD',
     status:     'ACTIVE',
     created:    Date.now(),
@@ -51,6 +51,10 @@ function createStateMachine(req, res) {
 function deleteStateMachine(req, res) {
   const b = parseBody(req);
   const name = b.stateMachineArn?.split(':').pop();
+  const sm = store.stepfunctions.stateMachines[name];
+  // Purge the machine's executions from the global map too, or they'd be
+  // orphaned there forever.
+  if (sm) for (const e of sm.executions) delete store.stepfunctions.executions[e.executionArn];
   delete store.stepfunctions.stateMachines[name];
   jsonResponse(res, 200, {});
 }
@@ -116,6 +120,14 @@ export function startStateMachineExecution(stateMachineArn, input = '{}', execNa
 
   sm.executions.unshift(execution);
   store.stepfunctions.executions[execArn] = execution;
+  // Cap per-machine history, evicting from the global map in lockstep so a
+  // recurring trigger (e.g. an EventBridge rate() rule targeting this machine)
+  // can't grow either unboundedly. while, not if: over-cap states from a
+  // snapshot import drain too.
+  while (sm.executions.length > 1000) {
+    const evicted = sm.executions.pop();
+    delete store.stepfunctions.executions[evicted.executionArn];
+  }
   store.addTrail({ method: 'POST', path: `/states/${name}/start`, status: 200, latency: 10 });
 
   // Simulate execution completing after ~500ms. unref so this doesn't keep

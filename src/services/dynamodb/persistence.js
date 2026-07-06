@@ -25,6 +25,9 @@ let hydrated = false;
 export function hydrateFromDisk(force = false) {
   if (hydrated && !force) return;
   hydrated = true;
+  // PERSIST=off promises a purely in-memory run — that has to gate reads
+  // too, or a snapshot from an earlier persisted session would still load.
+  if (process.env.MOCKCLOUD_DYNAMODB_PERSIST === 'off') return;
   const file = SNAPSHOT();
   if (!existsSync(file)) return;
   try {
@@ -67,9 +70,12 @@ function writeSnapshot() {
   }
 }
 
-// Remove the on-disk snapshot and reset the hydrate guard. Used by test
-// resetStore() so each test starts from a clean slate.
+// Remove the on-disk snapshot, cancel any pending debounced write (so a write
+// queued just before a reset can't recreate the file), and reset the hydrate
+// guard. Used by the DELETE /mockcloud/reset route and by the test helper
+// resetStore() so reset tables can't resurrect from a stale snapshot.
 export function wipeDisk() {
+  if (timer) { clearTimeout(timer); timer = null; }
   hydrated = false;
   try { rmSync(SNAPSHOT(), { force: true }); } catch {}
 }

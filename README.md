@@ -8,7 +8,10 @@ Run AWS services on your machine. Point your SDK at `localhost:4566` and go.
 npx mockcloud          # coming soon
 # or
 git clone https://github.com/mockcloud/mockcloud
-npm install && npm start
+cd mockcloud
+npm install
+npm --prefix ui install && npm run ui:build   # build the console UI
+npm start
 ```
 
 ```
@@ -110,8 +113,9 @@ docker run -p 4566:4566 -p 4567:4567 ghcr.io/mockcloud/mockcloud
 git clone https://github.com/mockcloud/mockcloud
 cd mockcloud
 npm install
-npm run ui:build     # build the console UI
-npm start            # start on :4566 (API) + :4567 (console)
+npm --prefix ui install   # console UI dependencies
+npm run ui:build          # build the console UI
+npm start                 # start on :4566 (API) + :4567 (console)
 ```
 
 ---
@@ -178,11 +182,14 @@ provider "aws" {
 | `PORT` | `4566` | AWS API port |
 | `UI_PORT` | `4567` | Console UI port |
 | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for Docker) |
+| `MOCKCLOUD_ALLOWED_ORIGINS` | (empty) | Comma-separated extra `Origin` values added to the CORS allowlist (the default allows only `http://localhost` / `http://127.0.0.1` on the API and UI ports). Required for browser console access from any other origin — mutating cross-origin requests are otherwise rejected with 403 |
 | `MOCKCLOUD_S3_ROOT` | `~/.mockcloud/s3` | Where S3 object bytes are persisted |
 | `MOCKCLOUD_DYNAMODB_ROOT` | `~/.mockcloud/dynamodb` | Where DynamoDB tables are persisted |
+| `MOCKCLOUD_DYNAMODB_PERSIST` | `on` | Set to `off` (exact string) to keep DynamoDB tables in memory only — disables the debounced disk snapshot and the shutdown flush |
 | `MOCKCLOUD_DISABLE_UI` | `false` | Skip the console UI server (headless / CI — only the API listens) |
 | `MOCKCLOUD_ENABLE_TERMINAL` | `false` | Enable the in-console shell. It runs host commands, so it's off by default; loopback binds only unless set to `force` |
 | `MOCKCLOUD_MAX_INTERNAL_INVOKES` | `200` | Re-entrancy cap: max internally-triggered (S3/SNS/EventBridge/Streams) Lambda invokes per 5s |
+| `MOCKCLOUD_MAX_LOG_STREAMS` | `200` | Max log streams kept per CloudWatch Logs group — Lambda creates one stream per invocation, and the oldest auto-created streams are evicted past the cap (streams created via the `CreateLogStream` API are never auto-evicted) |
 | `MOCKCLOUD_VERIFY_SIGV4` | `false` | When `true`, recompute the SigV4 signature (Authorization header or presigned query) against the stored secret and reject mismatches — `403 SignatureDoesNotMatch` / `InvalidAccessKeyId`. Off by default (any well-formed request is accepted) |
 | `MOCKCLOUD_IAM` | `off` | `soft` logs would-be authorization denials; `strict` enforces identity + resource policies for S3/SQS/SNS/Lambda/STS and returns `403 AccessDenied`. Off by default |
 | `MOCKCLOUD_POLL_INTERVAL_MS` | `1000` | Background poll cadence (SQS→Lambda mappings, EventBridge schedules) |
@@ -225,7 +232,7 @@ CI runs the full suite on every pull request (Node 18 & 20).
 
 ## Architecture
 
-MockCloud is a single Node process that runs two HTTP listeners. The `:4566` listener handles every AWS API call: it first tries the internal `/mockcloud/*` router (used by the console UI and tooling), then falls through to an AWS dispatcher that routes each call to one of 17 service handlers by `X-Amz-Target` header, `Action` parameter, or URL path. The `:4567` listener is a static file server for the prebuilt React console. All service state lives in a single in-memory `store`; S3 object bytes are additionally written to disk under `~/.mockcloud/s3/`, and EC2 in `vmm` mode delegates to the local Docker daemon.
+MockCloud is a single Node process that runs two HTTP listeners. The `:4566` listener handles every AWS API call: it first tries the internal `/mockcloud/*` router (used by the console UI and tooling), then falls through to an AWS dispatcher that routes each call to one of 15 service handlers by `X-Amz-Target` header, `Action` parameter, or URL path. The `:4567` listener is a static file server for the prebuilt React console. All service state lives in a single in-memory `store`; S3 object bytes are additionally written to disk under `~/.mockcloud/s3/`.
 
 ```mermaid
 flowchart LR
@@ -237,10 +244,10 @@ flowchart LR
         ui4567["Static UI server<br/>:4567"]
         aws4566["AWS API listener<br/>:4566"]
 
-        internal["/mockcloud/* router<br/>health · status · trail<br/>reset · export · ec2/mode"]
+        internal["/mockcloud/* router<br/>health · status · trail<br/>reset · export · import"]
         dispatcher["AWS dispatcher<br/>routes by target / action / path"]
 
-        subgraph services["service handlers (17)"]
+        subgraph services["service handlers (15)"]
             direction LR
             sns["SNS"]
             eb["EventBridge"]
@@ -249,14 +256,14 @@ flowchart LR
             sqs["SQS"]
             s3svc["S3"]
             ec2svc["EC2"]
-            others["10 other handlers<br/>dynamodb · iam · kms · ssm<br/>apigateway v1/v2 · ses<br/>secretsmanager<br/>stepfunctions · cognito"]
+            others["8 other handlers<br/>dynamodb · iam (incl. STS)<br/>secretsmanager · ses<br/>stepfunctions · cloudwatch<br/>cloudwatchlogs · bedrock"]
         end
 
         store[("In-memory store<br/>per-service state<br/>+ trail (cap 5000)")]
     end
 
     disk[("S3 objects on disk<br/>~/.mockcloud/s3/")]
-    docker["Local Docker daemon"]
+    ddbdisk[("DynamoDB snapshot<br/>~/.mockcloud/dynamodb/")]
 
     sdk -->|HTTP| aws4566
     browser -->|"/mockcloud/*"| aws4566
@@ -277,10 +284,10 @@ flowchart LR
     ddbs -->|trigger| lambda
 
     s3svc <-->|persist / hydrate| disk
-    ec2svc -. "vmm mode" .-> docker
+    others <-->|"persist / hydrate (dynamodb)"| ddbdisk
 ```
 
-Solid edges are synchronous HTTP requests or in-process calls (the cross-service fan-out arrows fire in-process via a shared `invokeLambda` / `enqueueMessage` helper); the dotted edge marks the optional Docker integration, active only when EC2 is in `vmm` mode.
+Solid edges are synchronous HTTP requests or in-process calls (the cross-service fan-out arrows fire in-process via a shared `invokeLambda` / `enqueueMessage` helper).
 
 ### Source layout
 
@@ -314,6 +321,7 @@ an SDK-driven test in `tests/`.
 git clone https://github.com/mockcloud/mockcloud
 cd mockcloud
 npm install
+npm --prefix ui install   # console UI dependencies
 npm run dev        # API with --watch
 # separate terminal:
 npm run ui:dev     # Vite dev server with HMR

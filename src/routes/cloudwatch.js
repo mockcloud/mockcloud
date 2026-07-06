@@ -5,41 +5,6 @@ import { jsonResponse } from '../middleware/response.js';
 
 export function registerCloudWatchRoutes(app) {
 
-  // All metric namespaces
-  app.get('/mockcloud/cloudwatch/namespaces', (req, res) => {
-    const namespaces = [...new Set(Object.keys(store.cloudwatch.metrics).map(k => k.split('/')[0]))];
-    jsonResponse(res, 200, { namespaces });
-  });
-
-  // All metrics (summary — last value per metric)
-  app.get('/mockcloud/cloudwatch/metrics', (req, res) => {
-    const metrics = Object.entries(store.cloudwatch.metrics).map(([key, points]) => {
-      const [namespace, ...rest] = key.split('/');
-      const metricName = rest.join('/');
-      const last = points[points.length - 1];
-      return {
-        namespace, metricName,
-        lastValue: last?.v ?? 0,
-        lastTime:  last?.t ?? null,
-        points:    points.length,
-        unit:      last?.unit || 'Count',
-      };
-    });
-    jsonResponse(res, 200, { metrics });
-  });
-
-  // Time-series data for a specific metric
-  app.get('/mockcloud/cloudwatch/metrics/:namespace/:name', (req, res) => {
-    const key = `${req.params.namespace}/${req.params.name}`;
-    const points = store.cloudwatch.metrics[key] || [];
-    const limit  = parseInt(req.query?.limit || '60');
-    jsonResponse(res, 200, {
-      namespace:  req.params.namespace,
-      metricName: req.params.name,
-      points:     points.slice(-limit).map(p => ({ t: p.t, v: p.v, unit: p.unit })),
-    });
-  });
-
   // Dashboard — pre-built set of key metrics for the WatchPage
   app.get('/mockcloud/cloudwatch/dashboard', (req, res) => {
     const get = (key, limit = 24) => (store.cloudwatch.metrics[key] || []).slice(-limit).map(p => ({ t: p.t, v: p.v }));
@@ -66,10 +31,5 @@ export function registerCloudWatchRoutes(app) {
         ebRules:           Object.values(store.eventbridge.buses).reduce((s, b) => s + Object.keys(b.rules).length, 0),
       },
     });
-  });
-
-  // Alarms
-  app.get('/mockcloud/cloudwatch/alarms', (req, res) => {
-    jsonResponse(res, 200, { alarms: Object.values(store.cloudwatch.alarms) });
   });
 }

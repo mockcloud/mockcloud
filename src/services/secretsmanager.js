@@ -1,5 +1,5 @@
 // services/secretsmanager.js
-import { store, randomId, arn } from '../store.js';
+import { store, arn } from '../store.js';
 import { jsonResponse, errorJson, getRawBody } from '../middleware/response.js';
 
 export async function handler(req, res) {

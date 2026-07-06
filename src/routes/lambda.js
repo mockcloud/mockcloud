@@ -1,5 +1,5 @@
 // routes/lambda.js — /mockcloud/lambda/* UI API
-import { store, randomId } from '../store.js';
+import { store } from '../store.js';
 import { jsonResponse, errorJson } from '../middleware/response.js';
 
 const body = req => req.parsedBody || {};
@@ -90,11 +90,5 @@ export function registerLambdaRoutes(app) {
       duration:   outcome.duration,
       logs:       fn.logs.slice(0, 5),
     });
-  });
-
-  app.get('/mockcloud/lambda/functions/:name/logs', (req, res) => {
-    const fn = store.lambda.functions[req.params.name];
-    if (!fn) return errorJson(res, 404, 'NotFound', 'Function not found');
-    jsonResponse(res, 200, { logs: fn.logs });
   });
 }

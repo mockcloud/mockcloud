@@ -12,6 +12,7 @@ import { TEST_S3_ROOT, TEST_DDB_ROOT } from './test-env.js';
 import http from 'http';
 import { mkdirSync, rmSync } from 'fs';
 import { store } from '../../src/store.js';
+import { wipeDisk } from '../../src/services/dynamodb/persistence.js';
 import { Router } from '../../src/router.js';
 import { dispatchAWS } from '../../src/dispatcher.js';
 import { registerAllRoutes } from '../../src/routes/index.js';
@@ -62,6 +63,10 @@ export async function startServer() {
     port,
     resetStore() {
       store.reset();
+      // wipeDisk targets the TEST_DDB_ROOT snapshot (test-env sets the env var
+      // before persistence.js captures it) and ALSO clears the pending debounce
+      // timer and the hydrate guard — the manual rmSync below can't do those.
+      wipeDisk();
       // Wipe the test S3 + DynamoDB disk dirs so hydration sees a clean slate
       try { rmSync(TEST_S3_ROOT, { recursive: true, force: true }); } catch {}
       try { rmSync(TEST_DDB_ROOT, { recursive: true, force: true }); } catch {}

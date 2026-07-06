@@ -1,8 +1,8 @@
 // src/services/lambda-esm.js
 // SQS → Lambda event-source-mapping poller. AWS auto-invokes a function with
 // batches of queue messages; MockCloud previously stored mappings inertly. This
-// runs as a background tick (registered below) and is also exported for
-// deterministic tests. DynamoDB-Streams mappings fire on write elsewhere.
+// runs as a background tick (registered below). DynamoDB-Streams mappings fire
+// on write elsewhere.
 import crypto from 'crypto';
 import { store } from '../store.js';
 import { invokeLambda } from './lambda.js';
@@ -11,7 +11,7 @@ import { registerTick } from '../lifecycle.js';
 
 let polling = false;
 
-export async function pollEventSourceMappingsOnce() {
+async function pollEventSourceMappingsOnce() {
   if (polling) return;                 // never overlap (the tick fires repeatedly)
   polling = true;
   try {

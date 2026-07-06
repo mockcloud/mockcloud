@@ -1,10 +1,9 @@
 // services/ec2.js
-import { store, randomId, arn } from '../store.js';
+import { store, randomId } from '../store.js';
 import { xmlResponse, errorXml, escapeXml, getRawBody } from '../middleware/response.js';
 
-// Strict allowlist for values that flow into the Docker CLI as labels/args.
-// Catches the injection vector even if a future code path drops the
-// execFile-vs-exec hardening in services/docker.js.
+// Strict allowlist for instance type / image id values, so crafted identifiers
+// can't smuggle markup into the XML/JSON responses they're echoed into.
 const SAFE_EC2_ID = /^[A-Za-z0-9._-]{1,64}$/;
 
 const INSTANCE_TYPES = {
@@ -487,7 +486,9 @@ export async function handler(req, res) {
     }
 
     default:
-      return xmlResponse(res, 200, ec2Wrap('UnknownResponse', '<ok/>'));
+      // Don't fake a 200 success for actions we don't implement — that silently
+      // breaks IaC (e.g. Terraform thinks a resource changed when it didn't).
+      return errorXml(res, 400, 'InvalidAction', `Unsupported EC2 action: ${action || '(none)'}`);
   }
 }
 

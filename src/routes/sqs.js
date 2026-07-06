@@ -1,7 +1,7 @@
 // routes/sqs.js — /mockcloud/sqs/* UI API
-import { store, randomId, arn } from '../store.js';
+import { store, arn } from '../store.js';
 import { jsonResponse, errorJson } from '../middleware/response.js';
-import { enqueueMessage } from '../services/sqs.js';
+import { enqueueMessage, hideMessage, cancelVisibilityTimer, removeAndCancel } from '../services/sqs.js';
 
 const body = req => req.parsedBody || {};
 
@@ -40,6 +40,9 @@ export function registerSQSRoutes(app) {
 
   app.delete('/mockcloud/sqs/queues/:name', (req, res) => {
     const url = `http://localhost:4566/000000000000/${req.params.name}`;
+    // Cancel in-flight visibility timers so the callbacks don't outlive the queue
+    const q = store.sqs.queues[url];
+    if (q) for (const m of q.messages) cancelVisibilityTimer(m);
     delete store.sqs.queues[url];
     store.addTrail({ method: 'DELETE', path: `/sqs/${req.params.name}`, status: 200, latency: 1 });
     jsonResponse(res, 200, { deleted: req.params.name });
@@ -83,10 +86,9 @@ export function registerSQSRoutes(app) {
     if (!q) return errorJson(res, 404, 'NotFound', 'Queue not found');
     const max = parseInt((req.parsedBody?.max) || req.query?.max || '1');
     const msgs = q.messages.filter(m => m.visible).slice(0, max);
-    msgs.forEach(m => {
-      m.visible = false;
-      setTimeout(() => { m.visible = true; }, 30000);
-    });
+    // hideMessage tracks the timer on the message (so delete/purge can cancel
+    // it), unrefs it, and bumps approxReceiveCount like AWS ReceiveMessage.
+    msgs.forEach(m => hideMessage(m, 30000));
     store.addTrail({ method: 'POST', path: `/sqs/${req.params.name}/receive`, status: 200, latency: 2 });
     jsonResponse(res, 200, {
       messages: msgs.map(m => ({ id: m.id, body: m.body, receiptHandle: m.receiptHandle, sent: m.sent })),
@@ -101,7 +103,7 @@ export function registerSQSRoutes(app) {
     const handle = req.parsedBody?.receiptHandle;
     if (!handle) return errorJson(res, 400, 'ValidationError', 'receiptHandle required');
     const before = q.messages.length;
-    q.messages = q.messages.filter(m => m.receiptHandle !== handle);
+    q.messages = removeAndCancel(q.messages, m => m.receiptHandle === handle);
     const removed = before - q.messages.length;
     store.addTrail({ method: 'POST', path: `/sqs/${req.params.name}/delete-message`, status: 200, latency: 1 });
     jsonResponse(res, 200, { removed });
@@ -113,6 +115,7 @@ export function registerSQSRoutes(app) {
     const q = store.sqs.queues[url];
     if (!q) return errorJson(res, 404, 'NotFound', 'Queue not found');
     const purged = q.messages.length;
+    for (const m of q.messages) cancelVisibilityTimer(m);
     q.messages = [];
     store.addTrail({ method: 'POST', path: `/sqs/${req.params.name}/purge`, status: 200, latency: 2 });
     jsonResponse(res, 200, { purged });

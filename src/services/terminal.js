@@ -1,6 +1,5 @@
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
-import { store } from '../store.js';
 
 const sessions = new Map();
 let nextId = 1;
@@ -36,20 +35,14 @@ const CLI_ENV = {
   AWS_SECRET_ACCESS_KEY: 'local',
 };
 
-export function createSession(type, instanceId) {
-  if (type === 'ec2') {
-    const inst = store.ec2.instances[instanceId];
-    if (!inst) throw new Error(`Instance ${instanceId} not found`);
-    if (!inst.containerId) throw new Error(
-      'Instance has no Docker container — only Docker-backed instances support Connect.\n' +
-      'Make sure Docker Desktop is running when you launch the instance.'
-    );
-  }
+export function createSession(type) {
+  // Only the host CLI shell is supported — EC2 'Connect' went away with the
+  // Docker integration (instances are simulated, not container-backed).
+  if (type !== 'cli') throw new Error(`Unsupported session type: ${type} — only 'cli' is available`);
 
   const id = `sess-${nextId++}`;
   const session = {
     id, type,
-    instanceId: instanceId || null,
     buffer: [], subs: new Set(),
     closed: false, busy: false,
     currentProc: null,
@@ -62,37 +55,26 @@ export function createSession(type, instanceId) {
   };
 
   // Welcome message — no process spawned yet
-  if (type === 'cli') {
-    let shellLabel;
-    if (process.platform === 'win32') {
-      const ws = getWindowsShell();
-      shellLabel = ws.type === 'wsl' ? 'WSL (bash)' : ws.type === 'gitbash' ? 'Git Bash' : 'cmd.exe';
-    } else {
-      shellLabel = process.env.SHELL || '/bin/sh';
-    }
-    session.push({ t: 'o', d:
-      '╔══════════════════════════════════════════════════════╗\r\n' +
-      '║      MockCloud CLI  —  pre-configured shell        ║\r\n' +
-      '╠══════════════════════════════════════════════════════╣\r\n' +
-     `║  shell   ${shellLabel.slice(0,42).padEnd(44)}║\r\n` +
-      '║  AWS_ENDPOINT_URL   = http://localhost:4566          ║\r\n' +
-      '║  AWS_DEFAULT_REGION = us-east-1                     ║\r\n' +
-      '╠══════════════════════════════════════════════════════╣\r\n' +
-      '║  try:  aws s3 ls                                     ║\r\n' +
-      '║        aws ec2 describe-instances                    ║\r\n' +
-      '║        aws lambda list-functions                     ║\r\n' +
-      '║        docker ps --filter label=mockcloud=ec2      ║\r\n' +
-      '╚══════════════════════════════════════════════════════╝\r\n\r\n'
-    });
+  let shellLabel;
+  if (process.platform === 'win32') {
+    const ws = getWindowsShell();
+    shellLabel = ws.type === 'wsl' ? 'WSL (bash)' : ws.type === 'gitbash' ? 'Git Bash' : 'cmd.exe';
   } else {
-    const inst = store.ec2.instances[instanceId];
-    session.push({ t: 'o', d:
-      `Connected to ${inst.name || instanceId}\r\n` +
-      `  OS:        ${inst.os}\r\n` +
-      `  Type:      ${inst.type}\r\n` +
-      `  Container: ${inst.containerId}\r\n\r\n`
-    });
+    shellLabel = process.env.SHELL || '/bin/sh';
   }
+  session.push({ t: 'o', d:
+    '╔══════════════════════════════════════════════════════╗\r\n' +
+    '║      MockCloud CLI  —  pre-configured shell        ║\r\n' +
+    '╠══════════════════════════════════════════════════════╣\r\n' +
+   `║  shell   ${shellLabel.slice(0,42).padEnd(44)}║\r\n` +
+    '║  AWS_ENDPOINT_URL   = http://localhost:4566          ║\r\n' +
+    '║  AWS_DEFAULT_REGION = us-east-1                     ║\r\n' +
+    '╠══════════════════════════════════════════════════════╣\r\n' +
+    '║  try:  aws s3 ls                                     ║\r\n' +
+    '║        aws ec2 describe-instances                    ║\r\n' +
+    '║        aws lambda list-functions                     ║\r\n' +
+    '╚══════════════════════════════════════════════════════╝\r\n\r\n'
+  });
 
   sessions.set(id, session);
   // Auto-expire after 30 min. unref so the timer doesn't keep the Node
@@ -125,39 +107,27 @@ export function execCommand(sessionId, command) {
 
   let cmd, args, env;
 
-  if (s.type === 'ec2') {
-    const inst = store.ec2.instances[s.instanceId];
-    if (!inst?.containerId) {
-      s.push({ t: 'e', d: 'Error: container not available\r\n' });
-      s.push({ t: 'r', code: 1 });
-      return;
-    }
-    cmd  = 'docker';
-    args = ['exec', inst.containerId, '/bin/sh', '-c', command];
-    env  = process.env;
-  } else {
-    if (process.platform === 'win32') {
-      const ws = getWindowsShell();
-      if (ws.type === 'wsl') {
-        // Pass env vars inline since WSL doesn't inherit Windows env automatically
-        const envPrefix = Object.entries(CLI_ENV).map(([k,v]) => `export ${k}=${v}`).join('; ');
-        cmd  = ws.path;
-        args = ['--', 'bash', '-c', `${envPrefix}; ${command}`];
-        env  = process.env;
-      } else if (ws.type === 'gitbash') {
-        cmd  = ws.path;
-        args = ['-c', command];
-        env  = { ...process.env, ...CLI_ENV };
-      } else {
-        cmd  = ws.path;
-        args = ['/d', '/c', command];
-        env  = { ...process.env, ...CLI_ENV };
-      }
-    } else {
-      cmd  = '/bin/sh';
+  if (process.platform === 'win32') {
+    const ws = getWindowsShell();
+    if (ws.type === 'wsl') {
+      // Pass env vars inline since WSL doesn't inherit Windows env automatically
+      const envPrefix = Object.entries(CLI_ENV).map(([k,v]) => `export ${k}=${v}`).join('; ');
+      cmd  = ws.path;
+      args = ['--', 'bash', '-c', `${envPrefix}; ${command}`];
+      env  = process.env;
+    } else if (ws.type === 'gitbash') {
+      cmd  = ws.path;
       args = ['-c', command];
       env  = { ...process.env, ...CLI_ENV };
+    } else {
+      cmd  = ws.path;
+      args = ['/d', '/c', command];
+      env  = { ...process.env, ...CLI_ENV };
     }
+  } else {
+    cmd  = '/bin/sh';
+    args = ['-c', command];
+    env  = { ...process.env, ...CLI_ENV };
   }
 
   s.busy = true;

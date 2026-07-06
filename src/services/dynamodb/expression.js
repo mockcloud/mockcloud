@@ -601,5 +601,3 @@ export function projectItem(item, projectionExpr, exprNames) {
   return out;
 }
 
-// Exported for potential reuse by Query / Scan FilterExpression later.
-export const __test = { tokenize, parse, compile, tvFromJs, tvFromDdb, compileProjection };

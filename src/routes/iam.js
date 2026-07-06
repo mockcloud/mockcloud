@@ -1,5 +1,5 @@
 // routes/iam.js — /mockcloud/iam/* UI API
-import { store, arn } from '../store.js';
+import { store, iamArn } from '../store.js';
 import { jsonResponse, errorJson } from '../middleware/response.js';
 
 const body = req => req.parsedBody || {};
@@ -16,7 +16,7 @@ export function registerIAMRoutes(app) {
     if (!name) return errorJson(res, 400, 'ValidationError', 'name required');
     if (store.iam.users[name]) return errorJson(res, 409, 'Conflict', 'User already exists');
     store.iam.users[name] = {
-      name, arn: arn('iam', `user/${name}`),
+      name, arn: iamArn(`user/${name}`),
       created: Date.now(), groups: [], policies: policies || [], mfa: false, accessKeys: [],
     };
     store.addTrail({ method: 'POST', path: `/iam/users/${name}`, status: 201, latency: 3 });
@@ -39,7 +39,7 @@ export function registerIAMRoutes(app) {
     if (!name) return errorJson(res, 400, 'ValidationError', 'name required');
     if (store.iam.roles[name]) return errorJson(res, 409, 'Conflict', 'Role already exists');
     store.iam.roles[name] = {
-      name, arn: arn('iam', `role/${name}`),
+      name, arn: iamArn(`role/${name}`),
       created: Date.now(), policies: policies || [], attached: 0,
     };
     store.addTrail({ method: 'POST', path: `/iam/roles/${name}`, status: 201, latency: 3 });

@@ -12,7 +12,6 @@ import { registerTerminalRoutes    } from './terminal.js';
 import { registerEventBridgeRoutes } from './eventbridge.js';
 import { registerCloudWatchRoutes  } from './cloudwatch.js';
 import { registerBedrockRoutes     } from './bedrock.js';
-import { registerStepFunctionsRoutes } from './stepfunctions.js';
 import { registerSESRoutes         } from './ses.js';
 
 export function registerAllRoutes(app) {
@@ -29,6 +28,5 @@ export function registerAllRoutes(app) {
   registerEventBridgeRoutes(app);
   registerCloudWatchRoutes(app);
   registerBedrockRoutes(app);
-  registerStepFunctionsRoutes(app);
   registerSESRoutes(app);
 }

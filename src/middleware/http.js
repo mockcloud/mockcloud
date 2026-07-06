@@ -32,7 +32,7 @@ for (const host of ['localhost', '127.0.0.1']) {
   }
 }
 
-export const ALLOWED_ORIGINS = new Set([...DEFAULT_ORIGINS, ...ENV_ORIGINS]);
+const ALLOWED_ORIGINS = new Set([...DEFAULT_ORIGINS, ...ENV_ORIGINS]);
 
 const JSON_CT_PREFIXES = [
   'application/json',
@@ -56,18 +56,18 @@ export async function attachBody(req) {
   req.parsedBody = parseBodyForJson(req);
 }
 
-export function parseBodyForJson(req) {
+function parseBodyForJson(req) {
   const ct = String(req.headers['content-type'] || '').toLowerCase();
   if (!JSON_CT_PREFIXES.some(p => ct.startsWith(p))) return {};
   try { return JSON.parse(req.rawBody || '{}'); } catch { return {}; }
 }
 
-export function originAllowed(origin) {
+function originAllowed(origin) {
   if (!origin) return true;
   return ALLOWED_ORIGINS.has(origin);
 }
 
-export function detectScope(req) {
+function detectScope(req) {
   const u = req.url || '';
   if (u.startsWith('/mockcloud/terminal/') || u === '/mockcloud/terminal') return 'terminal';
   if (u.startsWith('/mockcloud/'))                                         return 'ui';

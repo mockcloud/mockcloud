@@ -1,12 +1,9 @@
 // services/ses.js — AWS SES emulator
-import { store, randomId, arn } from '../store.js';
-import { jsonResponse, errorJson, xmlResponse, escapeXml } from '../middleware/response.js';
+import { store, randomId } from '../store.js';
+import { jsonResponse, errorJson, errorXml, xmlResponse, escapeXml, getFormBody } from '../middleware/response.js';
 
 function parseBody(req) {
   try { return JSON.parse(req.rawBody || '{}'); } catch { return {}; }
-}
-function parseForm(req) {
-  return Object.fromEntries(new URLSearchParams(req.rawBody || '').entries());
 }
 
 const TARGET_MAP = {
@@ -28,13 +25,21 @@ export function handler(req, res) {
   if (fn) return fn(req, res);
 
   // Form-encoded (old SES style)
-  const params = parseForm(req);
+  const params = getFormBody(req);
   const action = params.Action || new URLSearchParams(req.url.split('?')[1] || '').get('Action');
   if (action === 'SendEmail')           return sendEmailForm(req, res, params);
-  if (action === 'VerifyEmailIdentity') return verifyEmailForm(req, res, params);
-  if (action === 'ListIdentities')      return listIdentitiesForm(req, res);
+  if (action === 'SendRawEmail')        return sendRawEmailForm(req, res, params);
+  if (action === 'VerifyEmailIdentity') return verifyEmailForm(req, res, params, 'VerifyEmailIdentity');
+  if (action === 'VerifyEmailAddress')  return verifyEmailForm(req, res, params, 'VerifyEmailAddress');
+  if (action === 'ListIdentities')      return listIdentitiesForm(req, res, 'ListIdentities', 'Identities');
+  if (action === 'ListVerifiedEmailAddresses') return listIdentitiesForm(req, res, 'ListVerifiedEmailAddresses', 'VerifiedEmailAddresses');
+  if (action === 'DeleteIdentity')      return deleteIdentityForm(req, res, params);
   if (action === 'GetSendQuota')        return getSendQuotaForm(req, res);
+  if (action === 'GetSendStatistics')   return getSendStatsForm(req, res);
+  if (action === 'GetIdentityVerificationAttributes') return getVerificationAttrsForm(req, res, params);
 
+  // Query-protocol callers expect an XML <ErrorResponse>; JSON targets a {__type}.
+  if (action && !target) return errorXml(res, 400, 'InvalidAction', `Unknown SES action: ${action}`);
   return errorJson(res, 400, 'InvalidAction', `Unknown SES action: ${target || action}`);
 }
 
@@ -112,16 +117,39 @@ function sendEmailForm(req, res, p) {
   const id = mkEmail(p.Source, p['Destination.ToAddresses.member.1'], p['Message.Subject.Data'], p['Message.Body.Text.Data'], p['Message.Body.Html.Data']);
   xmlResponse(res, 200, `<?xml version="1.0"?><SendEmailResponse><SendEmailResult><MessageId>${id}</MessageId></SendEmailResult></SendEmailResponse>`);
 }
-function verifyEmailForm(req, res, p) {
-  if (p.EmailAddress) store.ses.identities[p.EmailAddress] = { email: p.EmailAddress, status: 'Success', verified: true };
-  xmlResponse(res, 200, `<?xml version="1.0"?><VerifyEmailIdentityResponse><VerifyEmailIdentityResult/></VerifyEmailIdentityResponse>`);
+function sendRawEmailForm(req, res, p) {
+  const id = mkEmail('raw@mockcloud.local', [], '(raw email)', p['RawMessage.Data'] || '', '');
+  xmlResponse(res, 200, `<?xml version="1.0"?><SendRawEmailResponse><SendRawEmailResult><MessageId>${id}</MessageId></SendRawEmailResult></SendRawEmailResponse>`);
 }
-function listIdentitiesForm(req, res) {
+// VerifyEmailIdentity and the legacy VerifyEmailAddress differ only in the
+// response wrapper, so both route here with their action name.
+function verifyEmailForm(req, res, p, name) {
+  if (p.EmailAddress) store.ses.identities[p.EmailAddress] = { email: p.EmailAddress, status: 'Success', verified: true };
+  xmlResponse(res, 200, `<?xml version="1.0"?><${name}Response><${name}Result/></${name}Response>`);
+}
+// Same for ListIdentities / ListVerifiedEmailAddresses (different list element).
+function listIdentitiesForm(req, res, name, listTag) {
   const members = Object.keys(store.ses.identities).map((e, i) => `<member>${escapeXml(e)}</member>`).join('');
-  xmlResponse(res, 200, `<?xml version="1.0"?><ListIdentitiesResponse><ListIdentitiesResult><Identities>${members}</Identities></ListIdentitiesResult></ListIdentitiesResponse>`);
+  xmlResponse(res, 200, `<?xml version="1.0"?><${name}Response><${name}Result><${listTag}>${members}</${listTag}></${name}Result></${name}Response>`);
+}
+function deleteIdentityForm(req, res, p) {
+  delete store.ses.identities[p.Identity];
+  xmlResponse(res, 200, `<?xml version="1.0"?><DeleteIdentityResponse><DeleteIdentityResult/></DeleteIdentityResponse>`);
 }
 function getSendQuotaForm(req, res) {
   xmlResponse(res, 200, `<?xml version="1.0"?><GetSendQuotaResponse><GetSendQuotaResult><Max24HourSend>50000</Max24HourSend><MaxSendRate>14</MaxSendRate><SentLast24Hours>${store.ses.sent}</SentLast24Hours></GetSendQuotaResult></GetSendQuotaResponse>`);
+}
+function getSendStatsForm(req, res) {
+  xmlResponse(res, 200, `<?xml version="1.0"?><GetSendStatisticsResponse><GetSendStatisticsResult><SendDataPoints/></GetSendStatisticsResult></GetSendStatisticsResponse>`);
+}
+function getVerificationAttrsForm(req, res, p) {
+  const entries = [];
+  for (let i = 1; p[`Identities.member.${i}`]; i++) {
+    const id = p[`Identities.member.${i}`];
+    const status = store.ses.identities[id] ? 'Success' : 'Pending';
+    entries.push(`<entry><key>${escapeXml(id)}</key><value><VerificationStatus>${status}</VerificationStatus></value></entry>`);
+  }
+  xmlResponse(res, 200, `<?xml version="1.0"?><GetIdentityVerificationAttributesResponse><GetIdentityVerificationAttributesResult><VerificationAttributes>${entries.join('')}</VerificationAttributes></GetIdentityVerificationAttributesResult></GetIdentityVerificationAttributesResponse>`);
 }
 
 // ── Inbound receipt rules (control-plane driven) ────────────────────────────

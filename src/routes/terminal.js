@@ -29,11 +29,11 @@ export function registerTerminalRoutes(app) {
 
   app.post('/mockcloud/terminal/sessions', async (req, res) => {
     if (denied(res)) return;
-    const { type, instanceId } = body(req);
-    if (!type) return errorJson(res, 400, 'ValidationError', 'type required (ec2 | cli)');
+    const { type } = body(req);
+    if (!type) return errorJson(res, 400, 'ValidationError', 'type required');
     try {
       const { createSession } = await import('../services/terminal.js');
-      const sessionId = createSession(type, instanceId);
+      const sessionId = createSession(type);
       jsonResponse(res, 201, { sessionId });
     } catch (e) {
       errorJson(res, 400, 'TerminalError', e.message);

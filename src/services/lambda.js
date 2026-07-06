@@ -9,7 +9,7 @@
 // All paths share runInNodeSandbox(), so a function uploaded via the AWS API
 // runs the same way whether triggered by `aws lambda invoke`, the UI button,
 // or a downstream service (SNS subscription, EventBridge target, DDB stream).
-import { store, randomId, arn } from '../store.js';
+import { store, randomId, arn, iamArn } from '../store.js';
 import { jsonResponse, errorJson, getRawBody } from '../middleware/response.js';
 import { putLogEvent } from './cloudwatchlogs.js';
 import { execFile } from 'child_process';
@@ -520,7 +520,7 @@ function fnConfig(fn) {
     FunctionArn:  arn('lambda', `function:${fn.name}`),
     Runtime:      fn.runtime,
     Handler:      fn.handler,
-    Role:         fn.role || arn('iam', `role/${fn.name}-role`),
+    Role:         fn.role || iamArn(`role/${fn.name}-role`),
     MemorySize:   fn.memory,
     Timeout:      fn.timeout,
     PackageType:  'Zip',

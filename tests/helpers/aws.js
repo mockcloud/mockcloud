@@ -1,6 +1,8 @@
 // tests/helpers/aws.js
 // Returns AWS SDK clients pre-wired to hit the test MockCloud instance.
-// Uses dummy credentials — MockCloud doesn't validate them.
+// Uses dummy credentials — MockCloud doesn't validate them by default
+// (opt-in via MOCKCLOUD_VERIFY_SIGV4 / MOCKCLOUD_IAM, exercised in
+// tests/sigv4.test.js and tests/iam-policy.test.js).
 
 import { EC2Client } from '@aws-sdk/client-ec2';
 import { S3Client } from '@aws-sdk/client-s3';

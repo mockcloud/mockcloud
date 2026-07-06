@@ -23,8 +23,10 @@ to write:
    - AWS API → `http://127.0.0.1:4566`
    - Console UI → `http://127.0.0.1:4567`
 3. **Connect** — the env vars and a minimal SDK client. MockCloud does **no**
-   credential or SigV4 validation, so any dummy creds work; the only thing that
-   matters is the `endpoint` override.
+   credential or SigV4 validation by default, so any dummy creds work; the only
+   thing that matters is the `endpoint` override. (Opt-in enforcement is
+   available via `MOCKCLOUD_VERIFY_SIGV4=true` and `MOCKCLOUD_IAM=soft|strict` —
+   see the main README's env-var table.)
 4. **Walkthrough** — a runnable end-to-end sequence as **both** AWS CLI and Node
    AWS SDK v3 blocks, covering the create → write → read → update → query path.
 5. **Supported / not-yet-supported** — an honest matrix so developers know what

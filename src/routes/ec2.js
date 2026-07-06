@@ -4,8 +4,9 @@ import { jsonResponse, errorJson } from '../middleware/response.js';
 
 const body = req => req.parsedBody || {};
 
-// Match the API-boundary regex in src/services/ec2.js. Both UI and AWS
-// surfaces funnel into spawnDockerContainer; both must validate.
+// Match the API-boundary regex in src/services/ec2.js: reject crafted
+// type/ami values so they can't smuggle markup into the JSON/XML responses
+// they're echoed into.
 const SAFE_EC2_ID = /^[A-Za-z0-9._-]{1,64}$/;
 
 const TYPE_SPECS = {
@@ -23,6 +24,14 @@ const AMI_OS = {
   'ami-alpine-3': 'Alpine Linux 3.19',
   'ami-nixos-23': 'NixOS 23.11',
 };
+
+// Schedule a state flip. Re-reads the store so the callback no-ops if the
+// instance was deleted/reset before it fires, and unrefs the timer so it
+// can't keep the event loop alive (matches src/services/ec2.js).
+function scheduleState(id, state, ms) {
+  const t = setTimeout(() => { if (store.ec2.instances[id]) store.ec2.instances[id].state = state; }, ms);
+  t.unref?.();
+}
 
 export function registerEC2Routes(app) {
 
@@ -57,7 +66,7 @@ export function registerEC2Routes(app) {
     };
     store.ec2.instances[id] = instance;
 
-    setTimeout(() => { if (store.ec2.instances[id]) store.ec2.instances[id].state = 'running'; }, 500);
+    scheduleState(id, 'running', 500);
 
     store.addTrail({ method: 'POST', path: '/ec2/instances', status: 201, latency: 8 });
     jsonResponse(res, 201, instance);
@@ -69,22 +78,18 @@ export function registerEC2Routes(app) {
     if (!inst) return errorJson(res, 404, 'NotFound', 'Instance not found');
 
     if (action === 'stop') inst.state = 'stopped';
-    else if (action === 'start') { inst.state = 'pending'; setTimeout(() => { if (inst) inst.state = 'running'; }, 2000); }
-    else if (action === 'reboot') { inst.state = 'pending'; setTimeout(() => { if (inst) inst.state = 'running'; }, 1000); }
+    else if (action === 'start') { inst.state = 'pending'; scheduleState(req.params.id, 'running', 2000); }
+    else if (action === 'reboot') { inst.state = 'pending'; scheduleState(req.params.id, 'running', 1000); }
     else if (action === 'terminate') {
       inst.state = 'terminated';
-      setTimeout(() => delete store.ec2.instances[req.params.id], 5000);
+      // delete on a missing key is a safe no-op after reset; unref so the
+      // timer can't keep the event loop alive
+      const t = setTimeout(() => delete store.ec2.instances[req.params.id], 5000);
+      t.unref?.();
     }
 
     store.addTrail({ method: 'POST', path: `/ec2/${req.params.id}/${action}`, status: 200, latency: 3 });
     jsonResponse(res, 200, { id: req.params.id, action, state: inst.state });
   });
 
-  app.delete('/mockcloud/ec2/instances/:id', (req, res) => {
-    const inst = store.ec2.instances[req.params.id];
-    if (!inst) return errorJson(res, 404, 'NotFound', 'Instance not found');
-    delete store.ec2.instances[req.params.id];
-    store.addTrail({ method: 'DELETE', path: `/ec2/${req.params.id}`, status: 200, latency: 1 });
-    jsonResponse(res, 200, { terminated: req.params.id });
-  });
 }

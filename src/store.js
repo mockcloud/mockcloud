@@ -5,6 +5,7 @@
 //   1. Add a factory in INITIAL_STATE
 //   2. (optional) add a stat in routes/status.js
 // reset/export/import will pick it up automatically.
+import { registerTick } from './lifecycle.js';
 
 // Per-service initial-state factories. Each must return a fresh object
 // — never share references between calls (otherwise reset would mutate
@@ -24,7 +25,7 @@ const INITIAL_STATE = {
   ec2:             () => ({ instances: {}, keyPairs: {}, securityGroups: {} }),
   eventbridge:     () => ({ buses: { default: { name: 'default', rules: {} } }, events: [] }),
   dynamodbstreams: () => ({ shards: {}, triggers: {} }),
-  cloudwatch:      () => ({ metrics: {}, alarms: {}, maxPoints: 1440 }),
+  cloudwatch:      () => ({ metrics: {}, maxPoints: 1440 }),
   logs:            () => ({ groups: {} }),
   bedrock:         () => ({ defaultResponse: 'This is a canned MockCloud Bedrock response.', rules: [], invocations: [] }),
   stepfunctions:   () => ({ stateMachines: {}, executions: {} }),
@@ -109,7 +110,17 @@ export const store = {
       ),
     };
     snap.trail = this.trail.slice(0, 500);
-    return JSON.stringify(snap, null, 2);
+    // _visTimer holds a live Timeout whose internal links are circular —
+    // setInvisible() defines it non-enumerable so it normally never reaches
+    // stringify, but one stray enumerable assignment elsewhere would crash
+    // every export. Drop it here too (import() deletes it on the way back
+    // in). The value check (Timeouts have refresh()) keeps user data safe:
+    // a DynamoDB attribute or message attribute literally named "_visTimer"
+    // arrives via JSON.parse and can never be a Timeout, so it still exports.
+    // FIFO dedupe Maps stringify as a misleading "{}" — drop them as well;
+    // import() discards them and enqueueMessage rebuilds the Map lazily.
+    return JSON.stringify(snap, (k, v) =>
+      ((k === '_visTimer' && typeof v?.refresh === 'function') || v instanceof Map ? undefined : v), 2);
   },
 
   // Restore from a snapshot. Unknown keys are ignored. Missing services
@@ -120,6 +131,24 @@ export const store = {
   // shallow Object.assign in v1.2.1 left these in place.
   import(data) {
     const p = typeof data === 'string' ? JSON.parse(data) : data;
+
+    // Validate the WHOLE snapshot before touching any state — a throw halfway
+    // through the apply loop would leave a half-imported store behind the
+    // route's 400 response. Each present field is type-checked against the
+    // service factory's default (e.g. sqs.queues must be an object, ses.emails
+    // an array) so a hand-edited snapshot can't poison the store with nulls.
+    const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+    for (const k of SERVICE_KEYS) {
+      if (!p[k]) continue;
+      if (!isObj(p[k])) throw new Error(`snapshot.${k} must be an object`);
+      for (const [field, defVal] of Object.entries(INITIAL_STATE[k]())) {
+        const v = p[k][field];
+        if (v === undefined) continue;
+        if (Array.isArray(defVal) && !Array.isArray(v)) throw new Error(`snapshot.${k}.${field} must be an array`);
+        if (isObj(defVal) && !isObj(v)) throw new Error(`snapshot.${k}.${field} must be an object`);
+      }
+    }
+
     for (const k of SERVICE_KEYS) {
       if (p[k]) {
         this[k] = INITIAL_STATE[k]();
@@ -127,6 +156,17 @@ export const store = {
       }
     }
     if (Array.isArray(p.trail)) this.trail = p.trail.slice(0, this.trailMax);
+
+    // SQS state needs normalization after a JSON round-trip: visibility-timer
+    // handles don't survive serialization (an in-flight message would stay
+    // invisible forever, so surface it for redelivery — SQS is at-least-once),
+    // and the FIFO dedupe Map deserializes as a plain object that would crash
+    // the next dedupe sweep. Deleting it lets enqueueMessage recreate the Map.
+    for (const q of Object.values(this.sqs.queues)) {
+      if (!Array.isArray(q.messages)) q.messages = [];
+      delete q.dedupe;
+      for (const m of q.messages) { delete m._visTimer; m.visible = true; }
+    }
   },
 };
 
@@ -138,15 +178,27 @@ export function arn(service, resource) {
   return `arn:aws:${service}:us-east-1:000000000000:${resource}`;
 }
 
-// Background CloudWatch collector — every 60s.
+// IAM ARNs are global — the region segment is empty (arn:aws:iam::ACCOUNT:...),
+// unlike the regional arn() above.
+export function iamArn(resource) {
+  return `arn:aws:iam::000000000000:${resource}`;
+}
+
+// Background CloudWatch collector — runs under lifecycle control (it only
+// fires between startBackground()/stopBackground(), see src/lifecycle.js),
+// self-throttled to one collection per 60s regardless of the tick cadence.
 // Defensive accessors guard against snapshot imports that omit fields
 // (e.g. a Lambda function without `invocations`, a bucket without `objects`).
-// Without these guards a single malformed entry can crash the interval and
+// Without these guards a single malformed entry can crash the collector and
 // silently break metrics for the rest of the session.
 const num = v => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 const objCount = b => (b && b.objects ? Object.keys(b.objects).length : 0);
 const objSizes = b => (b && b.objects ? Object.values(b.objects) : []);
-const metricsTimer = setInterval(() => {
+const METRICS_INTERVAL_MS = 60_000;
+let lastMetricsAt = 0;
+registerTick(() => {
+  if (Date.now() - lastMetricsAt < METRICS_INTERVAL_MS) return;
+  lastMetricsAt = Date.now();
   try {
     store.putMetric('MockCloud/Lambda', 'Invocations', Object.values(store.lambda.functions).reduce((s,f)=>s+num(f.invocations),0));
     store.putMetric('MockCloud/Lambda', 'Errors', Object.values(store.lambda.functions).reduce((s,f)=>s+num(f.errors),0));
@@ -158,7 +210,4 @@ const metricsTimer = setInterval(() => {
   } catch (e) {
     console.warn('[CloudWatch collector] tick failed:', e.message);
   }
-}, 60_000);
-// Don't keep the Node event loop alive solely for this interval — otherwise
-// `node --test` (and any embedder) hangs after the work is done.
-metricsTimer.unref?.();
+});

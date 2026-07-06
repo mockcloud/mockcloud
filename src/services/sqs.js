@@ -47,7 +47,11 @@ export async function handler(req, res) {
     }
     case 'DeleteQueue': {
       const url = params.get('QueueUrl');
-      const qName = store.sqs.queues[url]?.name || url.split('/').pop();
+      const q = store.sqs.queues[url];
+      const qName = q?.name || url.split('/').pop();
+      // Cancel in-flight visibility timers so deleted messages aren't retained
+      // until their (caller-controlled, possibly hours-long) timeout fires.
+      if (q) for (const m of q.messages) cancelVisibilityTimer(m);
       delete store.sqs.queues[url];
       store.addTrail({ method: 'POST', path: `/sqs/DeleteQueue/${qName}`, status: 200, latency: 1 });
       return xmlResponse(res, 200, sqsWrap('DeleteQueueResponse','DeleteQueueResult',''));
@@ -86,6 +90,23 @@ export async function handler(req, res) {
       return xmlResponse(res, 200, sqsWrap('SendMessageResponse','SendMessageResult',
         `<MessageId>${msg.id}</MessageId><MD5OfMessageBody>${md5(msgBody)}</MD5OfMessageBody>${seqXml}`));
     }
+    case 'SendMessageBatch': {
+      const url = params.get('QueueUrl');
+      const q = store.sqs.queues[url];
+      if (!q) return errorXml(res, 400, 'AWS.SimpleQueueService.NonExistentQueue', 'Queue not found');
+      const out = [];
+      for (const e of getBatchEntries(params, 'SendMessageBatchRequestEntry')) {
+        if (q.type === 'fifo' && !e.MessageGroupId) {
+          out.push(batchErrorXml(e.Id, 'MissingParameter', 'The request must contain the parameter MessageGroupId.'));
+          continue;
+        }
+        const body = e.MessageBody || '';
+        const msg = enqueueMessage(url, body, { dedupeId: e.MessageDeduplicationId, groupId: e.MessageGroupId, delaySeconds: Number(e.DelaySeconds) });
+        const seqXml = q.type === 'fifo' ? `<SequenceNumber>${msg.sequenceNumber}</SequenceNumber>` : '';
+        out.push(`<SendMessageBatchResultEntry><Id>${escapeXml(e.Id)}</Id><MessageId>${msg.id}</MessageId><MD5OfMessageBody>${md5(body)}</MD5OfMessageBody>${seqXml}</SendMessageBatchResultEntry>`);
+      }
+      return xmlResponse(res, 200, sqsWrap('SendMessageBatchResponse','SendMessageBatchResult', out.join('')));
+    }
     case 'ReceiveMessage': {
       const url = params.get('QueueUrl');
       const q = store.sqs.queues[url];
@@ -108,6 +129,41 @@ export async function handler(req, res) {
       const handle = params.get('ReceiptHandle');
       if (q) q.messages = removeAndCancel(q.messages, m => m.receiptHandle === handle);
       return xmlResponse(res, 200, sqsWrap('DeleteMessageResponse','DeleteMessageResult',''));
+    }
+    case 'DeleteMessageBatch': {
+      const url = params.get('QueueUrl');
+      const q = store.sqs.queues[url];
+      if (!q) return errorXml(res, 400, 'AWS.SimpleQueueService.NonExistentQueue', 'Queue not found');
+      const out = [];
+      for (const e of getBatchEntries(params, 'DeleteMessageBatchRequestEntry')) {
+        const before = q.messages.length;
+        q.messages = removeAndCancel(q.messages, m => m.receiptHandle === e.ReceiptHandle);
+        if (q.messages.length < before) out.push(`<DeleteMessageBatchResultEntry><Id>${escapeXml(e.Id)}</Id></DeleteMessageBatchResultEntry>`);
+        else out.push(batchErrorXml(e.Id, 'ReceiptHandleIsInvalid', 'The receipt handle does not match any message.'));
+      }
+      return xmlResponse(res, 200, sqsWrap('DeleteMessageBatchResponse','DeleteMessageBatchResult', out.join('')));
+    }
+    case 'ChangeMessageVisibility': {
+      const url = params.get('QueueUrl');
+      const q = store.sqs.queues[url];
+      if (!q) return errorXml(res, 400, 'AWS.SimpleQueueService.NonExistentQueue', 'Queue not found');
+      const m = q.messages.find(m => m.receiptHandle === params.get('ReceiptHandle'));
+      if (!m) return errorXml(res, 400, 'ReceiptHandleIsInvalid', 'The receipt handle does not match any message.');
+      setInvisible(m, parseInt(params.get('VisibilityTimeout') || '30', 10) * 1000);
+      return xmlResponse(res, 200, sqsWrap('ChangeMessageVisibilityResponse','ChangeMessageVisibilityResult',''));
+    }
+    case 'ChangeMessageVisibilityBatch': {
+      const url = params.get('QueueUrl');
+      const q = store.sqs.queues[url];
+      if (!q) return errorXml(res, 400, 'AWS.SimpleQueueService.NonExistentQueue', 'Queue not found');
+      const out = [];
+      for (const e of getBatchEntries(params, 'ChangeMessageVisibilityBatchRequestEntry')) {
+        const m = q.messages.find(m => m.receiptHandle === e.ReceiptHandle);
+        if (!m) { out.push(batchErrorXml(e.Id, 'ReceiptHandleIsInvalid', 'The receipt handle does not match any message.')); continue; }
+        setInvisible(m, parseInt(e.VisibilityTimeout || '30', 10) * 1000);
+        out.push(`<ChangeMessageVisibilityBatchResultEntry><Id>${escapeXml(e.Id)}</Id></ChangeMessageVisibilityBatchResultEntry>`);
+      }
+      return xmlResponse(res, 200, sqsWrap('ChangeMessageVisibilityBatchResponse','ChangeMessageVisibilityBatchResult', out.join('')));
     }
     case 'GetQueueAttributes': {
       const url = params.get('QueueUrl');
@@ -186,7 +242,11 @@ async function handleJsonProtocol(req, res, action, payload) {
       return jsonResponse(res, 200, { QueueUrls: Object.keys(store.sqs.queues) });
     }
     case 'DeleteQueue': {
-      const qName = store.sqs.queues[payload.QueueUrl]?.name || payload.QueueUrl.split('/').pop();
+      const q = store.sqs.queues[payload.QueueUrl];
+      const qName = q?.name || payload.QueueUrl.split('/').pop();
+      // Cancel in-flight visibility timers so deleted messages aren't retained
+      // until their (caller-controlled, possibly hours-long) timeout fires.
+      if (q) for (const m of q.messages) cancelVisibilityTimer(m);
       delete store.sqs.queues[payload.QueueUrl];
       store.addTrail({ method: 'POST', path: `/sqs/DeleteQueue/${qName}`, status: 200, latency: 1 });
       return jsonResponse(res, 200, {});
@@ -432,6 +492,12 @@ function setInvisible(m, ms) {
   cancelVisibilityTimer(m);
   if (ms <= 0) { m.visible = true; return; }
   m.visible = false;
+  // _visTimer is defined non-enumerable: the live Timeout handle is circular,
+  // so it must never reach JSON.stringify (store.export would throw whenever
+  // any message is in flight). This is the only place the property is created.
+  if (!Object.getOwnPropertyDescriptor(m, '_visTimer')) {
+    Object.defineProperty(m, '_visTimer', { value: null, writable: true, configurable: true, enumerable: false });
+  }
   m._visTimer = setTimeout(() => { m.visible = true; m._visTimer = null; }, ms);
   m._visTimer.unref?.();
 }
@@ -456,6 +522,24 @@ export function removeAndCancel(messages, predicate) {
     else kept.push(m);
   }
   return kept;
+}
+
+// Parse the query protocol's flattened batch entries: <prefix>.N.<Field>.
+function getBatchEntries(params, prefix) {
+  const entries = [];
+  for (let i = 1; params.get(`${prefix}.${i}.Id`) !== null; i++) {
+    const e = { Id: params.get(`${prefix}.${i}.Id`) };
+    for (const f of ['MessageBody', 'ReceiptHandle', 'MessageGroupId', 'MessageDeduplicationId', 'DelaySeconds', 'VisibilityTimeout']) {
+      const v = params.get(`${prefix}.${i}.${f}`);
+      if (v !== null) e[f] = v;
+    }
+    entries.push(e);
+  }
+  return entries;
+}
+
+function batchErrorXml(id, code, message) {
+  return `<BatchResultErrorEntry><Id>${escapeXml(id)}</Id><Code>${code}</Code><Message>${escapeXml(message)}</Message><SenderFault>true</SenderFault></BatchResultErrorEntry>`;
 }
 
 function md5(str) {

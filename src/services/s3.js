@@ -32,7 +32,7 @@ const S3_ROOT = process.env.MOCKCLOUD_S3_ROOT || path.join(os.homedir(), '.mockc
 // against bucket names like '../..' that would escape S3_ROOT when joined.
 // safeJoin (below) is the belt-and-braces backup if a bad name ever slips
 // through.
-export const BUCKET_NAME_RE = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
+const BUCKET_NAME_RE = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
 export function isValidBucketName(name) {
   return typeof name === 'string' && BUCKET_NAME_RE.test(name);
 }

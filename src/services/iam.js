@@ -1,5 +1,5 @@
 // services/iam.js
-import { store, randomId, arn } from '../store.js';
+import { store, randomId, iamArn } from '../store.js';
 import { xmlResponse, errorXml, escapeXml, getRawBody } from '../middleware/response.js';
 
 export async function handler(req, res) {
@@ -18,12 +18,23 @@ export async function handler(req, res) {
       return xmlResponse(res, 200, wrap('AssumeRoleResponse','AssumeRoleResult',
         `<Credentials><AccessKeyId>ASIAIOSFODNN7EXAMPLE</AccessKeyId><SecretAccessKey>wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY</SecretAccessKey><SessionToken>FQoGZXIvYXdzEJr//fake-session-token</SessionToken><Expiration>${new Date(Date.now()+3600000).toISOString()}</Expiration></Credentials><AssumedRoleUser><Arn>${escapeXml(roleArn)}/${escapeXml(session)}</Arn><AssumedRoleId>AROAIOSFODNN7EXAMPLE:${escapeXml(session)}</AssumedRoleId></AssumedRoleUser>`));
     }
+    case 'GetSessionToken': {
+      // Real STS rejects non-numeric / out-of-range durations with a 400 —
+      // without the guard a NaN duration makes toISOString() throw → 500.
+      const raw = params.get('DurationSeconds');
+      const duration = raw === null ? 43200 : Number.parseInt(raw, 10);
+      if (!Number.isFinite(duration) || duration < 900 || duration > 129600)
+        return errorXml(res, 400, 'ValidationError', 'DurationSeconds must be between 900 and 129600');
+      const exp = new Date(Date.now() + duration * 1000).toISOString();
+      return xmlResponse(res, 200, wrap('GetSessionTokenResponse','GetSessionTokenResult',
+        `<Credentials><AccessKeyId>ASIAIOSFODNN7EXAMPLE</AccessKeyId><SecretAccessKey>wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY</SecretAccessKey><SessionToken>FQoGZXIvYXdzEJr//fake-session-token</SessionToken><Expiration>${exp}</Expiration></Credentials>`));
+    }
 
     // ── Users ─────────────────────────────────────────────────────────────
     case 'CreateUser': {
       const name = params.get('UserName');
       if (store.iam.users[name]) return errorXml(res, 409, 'EntityAlreadyExists', `User ${name} already exists`);
-      store.iam.users[name] = { name, arn: arn('iam',`user/${name}`), created: Date.now(), groups:[], policies:[], mfa:false, accessKeys:[] };
+      store.iam.users[name] = { name, arn: iamArn(`user/${name}`), created: Date.now(), groups:[], policies:[], mfa:false, accessKeys:[] };
       store.addTrail({ method: 'POST', path: `/iam/CreateUser/${name}`, status: 200, latency: 2 });
       return xmlResponse(res, 200, wrap('CreateUserResponse','CreateUserResult', `<User><UserName>${escapeXml(name)}</UserName><Arn>${escapeXml(store.iam.users[name].arn)}</Arn><UserId>${randomId(20).toUpperCase()}</UserId></User>`));
     }
@@ -48,7 +59,7 @@ export async function handler(req, res) {
     case 'CreateRole': {
       const name = params.get('RoleName');
       if (store.iam.roles[name]) return errorXml(res, 409, 'EntityAlreadyExists', `Role ${name} already exists`);
-      const a = arn('iam', `role/${name}`);
+      const a = iamArn(`role/${name}`);
       const roleId = 'AROA' + randomId(16).toUpperCase();
       store.iam.roles[name] = { name, arn: a, roleId, path: params.get('Path') || '/', created: Date.now(), policies:[], trustPolicy: params.get('AssumeRolePolicyDocument'), attached: 0 };
       store.addTrail({ method: 'POST', path: `/iam/CreateRole/${name}`, status: 200, latency: 2 });
@@ -71,7 +82,10 @@ export async function handler(req, res) {
       return xmlResponse(res, 200, wrap('ListRolesResponse','ListRolesResult', `<Roles>${roles}</Roles>`));
     }
     case 'ListRolePolicies': {
-      return xmlResponse(res, 200, wrap('ListRolePoliciesResponse','ListRolePoliciesResult', `<PolicyNames></PolicyNames><IsTruncated>false</IsTruncated>`));
+      const role = store.iam.roles[params.get('RoleName')];
+      const names = role?.inlinePolicies ? Object.keys(role.inlinePolicies) : [];
+      const members = names.map(n => `<member>${escapeXml(n)}</member>`).join('');
+      return xmlResponse(res, 200, wrap('ListRolePoliciesResponse','ListRolePoliciesResult', `<PolicyNames>${members}</PolicyNames><IsTruncated>false</IsTruncated>`));
     }
     case 'ListAttachedRolePolicies': {
       return xmlResponse(res, 200, wrap('ListAttachedRolePoliciesResponse','ListAttachedRolePoliciesResult', `<AttachedPolicies></AttachedPolicies><IsTruncated>false</IsTruncated>`));
@@ -98,6 +112,37 @@ export async function handler(req, res) {
       store.addTrail({ method: 'POST', path: `/iam/DetachRolePolicy/${name}`, status: 200, latency: 1 });
       return xmlResponse(res, 200, wrap('DetachRolePolicyResponse','',''));
     }
+    case 'CreatePolicy': {
+      const name = params.get('PolicyName');
+      if (!name) return errorXml(res, 400, 'ValidationError', 'PolicyName is required');
+      if (store.iam.policies[name]) return errorXml(res, 409, 'EntityAlreadyExists', `Policy ${name} already exists`);
+      const path = params.get('Path') || '/';
+      const a = iamArn(`policy${path}${name}`);
+      const policyId = 'ANPA' + randomId(16).toUpperCase();
+      const now = new Date().toISOString();
+      store.iam.policies[name] = { name, arn: a, policyId, path, document: params.get('PolicyDocument'), created: Date.now() };
+      store.addTrail({ method: 'POST', path: `/iam/CreatePolicy/${name}`, status: 200, latency: 2 });
+      return xmlResponse(res, 200, wrap('CreatePolicyResponse','CreatePolicyResult',
+        `<Policy><PolicyName>${escapeXml(name)}</PolicyName><PolicyId>${policyId}</PolicyId><Arn>${escapeXml(a)}</Arn><Path>${escapeXml(path)}</Path><DefaultVersionId>v1</DefaultVersionId><AttachmentCount>0</AttachmentCount><IsAttachable>true</IsAttachable><CreateDate>${now}</CreateDate><UpdateDate>${now}</UpdateDate></Policy>`));
+    }
+    case 'PutRolePolicy': {
+      const name = params.get('RoleName');
+      const role = store.iam.roles[name];
+      if (!role) return errorXml(res, 404, 'NoSuchEntity', `Role ${name} not found`);
+      const policyName = params.get('PolicyName');
+      if (!policyName) return errorXml(res, 400, 'ValidationError', 'PolicyName is required');
+      role.inlinePolicies = role.inlinePolicies || {};
+      role.inlinePolicies[policyName] = params.get('PolicyDocument') || '';
+      store.addTrail({ method: 'POST', path: `/iam/PutRolePolicy/${name}`, status: 200, latency: 1 });
+      return xmlResponse(res, 200, wrap('PutRolePolicyResponse','',''));
+    }
+    case 'DeleteRolePolicy': {
+      const name = params.get('RoleName');
+      const role = store.iam.roles[name];
+      if (role?.inlinePolicies) delete role.inlinePolicies[params.get('PolicyName')];
+      store.addTrail({ method: 'POST', path: `/iam/DeleteRolePolicy/${name}`, status: 200, latency: 1 });
+      return xmlResponse(res, 200, wrap('DeleteRolePolicyResponse','',''));
+    }
     case 'CreateAccessKey': {
       const userName = params.get('UserName');
       const user = store.iam.users[userName];
@@ -110,7 +155,9 @@ export async function handler(req, res) {
     }
 
     default:
-      return xmlResponse(res, 200, wrap('UnknownResponse','Result','<ok/>'));
+      // Don't fake a 200 success for actions we don't implement — that silently
+      // breaks IaC (e.g. Terraform thinks a policy attached when it didn't).
+      return errorXml(res, 400, 'InvalidAction', `Unsupported IAM/STS action: ${action || '(none)'}`);
   }
 }
 
