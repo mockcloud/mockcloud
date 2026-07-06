@@ -17,6 +17,7 @@ import (
 	"github.com/mockcloud/mockcloud/internal/controlplane"
 	"github.com/mockcloud/mockcloud/internal/dispatch"
 	"github.com/mockcloud/mockcloud/internal/httpapi"
+	"github.com/mockcloud/mockcloud/internal/iampolicy"
 	"github.com/mockcloud/mockcloud/internal/protocol/respond"
 	"github.com/mockcloud/mockcloud/internal/services/dynamodb"
 	"github.com/mockcloud/mockcloud/internal/services/ec2"
@@ -26,6 +27,7 @@ import (
 	"github.com/mockcloud/mockcloud/internal/services/s3"
 	"github.com/mockcloud/mockcloud/internal/services/secretsmanager"
 	"github.com/mockcloud/mockcloud/internal/services/ses"
+	"github.com/mockcloud/mockcloud/internal/sigv4"
 	"github.com/mockcloud/mockcloud/internal/state"
 	"github.com/mockcloud/mockcloud/internal/store"
 )
@@ -45,6 +47,21 @@ func main() {
 	iamSvc := iam.New(st)
 	smSvc := secretsmanager.New(st)
 	disp := dispatch.New(st, cfg, lambdaSvc, s3Svc, ddbSvc, ebSvc, sesSvc, ec2Svc, iamSvc, smSvc)
+
+	// Opt-in security middleware (src/index.js: SigV4 then IAM, before dispatch).
+	sigv4Enabled := cfg.VerifySigV4
+	iamMode := iampolicy.Mode()
+	// Resolve access-key-id → owning username for IAM principal derivation
+	// without the iampolicy package importing store just for the map read.
+	iampolicy.SetOwnerLookup(func(akid string) string {
+		var owner string
+		st.With(func(s *state.State) {
+			if s.IAM.AccessKeyOwners != nil {
+				owner = s.IAM.AccessKeyOwners[akid]
+			}
+		})
+		return owner
+	})
 
 	// /mockcloud/* control plane — registration follows src/routes/index.js
 	// order (status, s3, dynamo, lambda, ec2, secrets, iam, terminal, ses).
@@ -83,6 +100,20 @@ func main() {
 		req := httpapi.Attach(r)
 		if router.Dispatch(w, req) {
 			return
+		}
+		// Opt-in SigV4 verification then IAM enforcement, before AWS dispatch —
+		// /mockcloud/* routes above are internal and exempt (src/index.js order).
+		if sigv4Enabled {
+			if err := sigv4.Verify(req, st); err != nil {
+				sigv4.SendError(w, req, err)
+				return
+			}
+		}
+		if iamMode != "off" {
+			if err := iampolicy.Enforce(req, st); err != nil {
+				iampolicy.SendError(w, req, err)
+				return
+			}
 		}
 		disp.Dispatch(w, req)
 	})
