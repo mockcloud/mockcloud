@@ -1,4 +1,7 @@
 [
+  "cloudwatch.test.js",
   "control-plane.test.js",
-  "error-boundary.test.js"
+  "error-boundary.test.js",
+  "logs-stream-cap.test.js",
+  "logs.test.js"
 ]

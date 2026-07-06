@@ -12,10 +12,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mockcloud/mockcloud/internal/config"
 	"github.com/mockcloud/mockcloud/internal/httpapi"
 	"github.com/mockcloud/mockcloud/internal/protocol/respond"
+	"github.com/mockcloud/mockcloud/internal/services/logs"
 	"github.com/mockcloud/mockcloud/internal/state"
 	"github.com/mockcloud/mockcloud/internal/store"
 )
@@ -252,6 +254,10 @@ func (l *Service) Invoke(fnName, eventStr, source, requestID string) Outcome {
 	}
 
 	start := state.NowMs()
+	// Execution logs stream to CloudWatch Logs at /aws/lambda/<fn> so
+	// `aws logs tail` / FilterLogEvents work like real Lambda.
+	logGroup := "/aws/lambda/" + fnName
+	logStream := time.Now().UTC().Format("2006/01/02") + "/[$LATEST]" + requestID
 	var runtime, code string
 	var found bool
 	l.st.With(func(s *state.State) {
@@ -264,7 +270,7 @@ func (l *Service) Invoke(fnName, eventStr, source, requestID string) Outcome {
 		now := state.NowMs()
 		fn.LastInvoked = &now
 		runtime, code = fn.Runtime, fn.Code
-		logLine(fn, "INFO", "START RequestId: "+requestID+" Source: "+sourceOr(source))
+		l.logLine(s, fn, logGroup, logStream, "INFO", "START RequestId: "+requestID+" Source: "+sourceOr(source))
 	})
 	if !found {
 		return Outcome{Error: "Function not found: " + fnName, RequestID: requestID}
@@ -298,10 +304,10 @@ func (l *Service) Invoke(fnName, eventStr, source, requestID string) Outcome {
 		status := "200"
 		if errStr != "" {
 			fn.Errors++
-			logLine(fn, "ERROR", "Invocation failed: "+errStr)
+			l.logLine(s, fn, logGroup, logStream, "ERROR", "Invocation failed: "+errStr)
 			status = "500"
 		}
-		logLine(fn, "INFO", "END Duration: "+itoa(duration)+"ms Status: "+status)
+		l.logLine(s, fn, logGroup, logStream, "INFO", "END Duration: "+itoa(duration)+"ms Status: "+status)
 	})
 	return Outcome{Result: result, Duration: duration, Error: errStr, RequestID: requestID}
 }
@@ -317,13 +323,14 @@ type orderedSyntheticBody struct {
 	Event    any    `json:"event"`
 }
 
-// logLine ports invokeLambda's log(): prepend to fn.logs, cap 200.
-// (CloudWatch Logs streaming attaches in M2.)
-func logLine(fn *state.LambdaFn, level, msg string) {
+// logLine ports invokeLambda's log(): prepend to fn.logs (cap 200) AND
+// stream to CloudWatch Logs. Called inside store.With.
+func (l *Service) logLine(s *state.State, fn *state.LambdaFn, group, stream, level, msg string) {
 	fn.Logs = append([]state.LogLine{{T: state.NowMs(), Level: level, Msg: msg}}, fn.Logs...)
 	if len(fn.Logs) > 200 {
 		fn.Logs = fn.Logs[:200]
 	}
+	logs.PutLogEventLocked(s, l.cfg.MaxLogStreams, group, stream, "["+level+"] "+msg, state.NowMs())
 }
 
 func (l *Service) budgetExceeded(source string) bool {

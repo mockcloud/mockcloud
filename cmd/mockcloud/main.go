@@ -31,7 +31,7 @@ func main() {
 	disp := dispatch.New(st, cfg, lambdaSvc)
 
 	router := &controlplane.Router{}
-	deps := controlplane.Deps{Store: st, Cfg: cfg}
+	deps := controlplane.Deps{Store: st, Cfg: cfg, Lambda: lambdaSvc}
 	controlplane.RegisterStatusRoutes(router, deps)
 	if cfg.TestEndpoints {
 		controlplane.RegisterTestRoutes(router, deps)

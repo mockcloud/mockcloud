@@ -11,8 +11,10 @@ import (
 	"github.com/mockcloud/mockcloud/internal/config"
 	"github.com/mockcloud/mockcloud/internal/httpapi"
 	"github.com/mockcloud/mockcloud/internal/protocol/respond"
+	"github.com/mockcloud/mockcloud/internal/services/cloudwatch"
 	"github.com/mockcloud/mockcloud/internal/services/eventbridge"
 	"github.com/mockcloud/mockcloud/internal/services/lambda"
+	"github.com/mockcloud/mockcloud/internal/services/logs"
 	"github.com/mockcloud/mockcloud/internal/services/s3"
 	"github.com/mockcloud/mockcloud/internal/services/sqs"
 	"github.com/mockcloud/mockcloud/internal/store"
@@ -38,6 +40,7 @@ type Dispatcher struct {
 
 	s3Svc     *s3.Service
 	lambdaSvc *lambda.Service
+	logsSvc   *logs.Service
 }
 
 func New(st *store.Store, cfg *config.Config, lambdaSvc *lambda.Service) *Dispatcher {
@@ -45,6 +48,7 @@ func New(st *store.Store, cfg *config.Config, lambdaSvc *lambda.Service) *Dispat
 		st: st, cfg: cfg,
 		s3Svc:     s3.New(st, cfg),
 		lambdaSvc: lambdaSvc,
+		logsSvc:   logs.New(st, cfg),
 	}
 }
 
@@ -76,7 +80,7 @@ func (d *Dispatcher) Dispatch(w http.ResponseWriter, r *httpapi.Request) {
 	case strings.HasPrefix(target, "AWSStepFunctions."):
 		notPorted(w, r, "Step Functions", "M7")
 	case strings.HasPrefix(target, "Logs_20140328."):
-		notPorted(w, r, "CloudWatch Logs", "M2")
+		d.logsSvc.Handler(w, r)
 	case strings.HasPrefix(target, "DynamoDBStreams_"):
 		notPorted(w, r, "DynamoDB Streams", "M4")
 	case strings.HasPrefix(target, "DynamoDB_"):
@@ -98,7 +102,7 @@ func (d *Dispatcher) Dispatch(w http.ResponseWriter, r *httpapi.Request) {
 	case has(sqsActions, action) || strings.HasPrefix(target, "AmazonSQS."):
 		sqs.Handler(w, r, d.st)
 	case strings.HasPrefix(target, "GraniteServiceVersion20100801."):
-		notPorted(w, r, "CloudWatch", "M2")
+		cloudwatch.Handler(w, r, d.st)
 	case strings.HasPrefix(path, "/model/") || strings.HasPrefix(path, "/guardrail/"):
 		notPorted(w, r, "Bedrock", "M10")
 	default:

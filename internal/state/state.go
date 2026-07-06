@@ -181,7 +181,39 @@ type MetricPoint struct {
 }
 
 type LogsState struct {
-	Groups map[string]any `json:"groups"`
+	Groups map[string]*LogGroup `json:"groups"`
+	// seq numbers stream creation for deterministic eviction tie-breaks
+	// (Node relied on Object.keys insertion order; Go maps randomize).
+	// Unexported → never serialized.
+	seq int64
+}
+
+// NextStreamSeq hands out insertion-order sequence numbers for streams.
+func (l *LogsState) NextStreamSeq() int64 { l.seq++; return l.seq }
+
+type LogGroup struct {
+	Name    string                `json:"name"`
+	Arn     string                `json:"arn"`
+	Created int64                 `json:"created"`
+	Streams map[string]*LogStream `json:"streams"`
+}
+
+type LogStream struct {
+	Name        string     `json:"name"`
+	Created     int64      `json:"created"`
+	LastEventTs int64      `json:"lastEventTs"`
+	Events      []LogEvent `json:"events"`
+	// Marked on CreateLogStream API calls — cap eviction skips these. Node set
+	// the property only when true; omitempty matches that snapshot shape.
+	UserCreated bool  `json:"userCreated,omitempty"`
+	Seq         int64 `json:"-"`
+}
+
+type LogEvent struct {
+	Timestamp     int64  `json:"timestamp"`
+	Message       string `json:"message"`
+	IngestionTime int64  `json:"ingestionTime"`
+	EventID       string `json:"eventId"`
 }
 
 type BedrockState struct {
@@ -244,7 +276,7 @@ func NewDDBStreams() *DDBStreamsState {
 func NewCloudWatch() *CloudWatchState {
 	return &CloudWatchState{Metrics: map[string][]MetricPoint{}, MaxPoints: 1440}
 }
-func NewLogs() *LogsState { return &LogsState{Groups: map[string]any{}} }
+func NewLogs() *LogsState { return &LogsState{Groups: map[string]*LogGroup{}} }
 func NewBedrock() *BedrockState {
 	return &BedrockState{
 		DefaultResponse: "This is a canned MockCloud Bedrock response.",

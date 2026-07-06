@@ -11,6 +11,7 @@ import (
 	"github.com/mockcloud/mockcloud/internal/config"
 	"github.com/mockcloud/mockcloud/internal/httpapi"
 	"github.com/mockcloud/mockcloud/internal/protocol/respond"
+	"github.com/mockcloud/mockcloud/internal/services/lambda"
 	"github.com/mockcloud/mockcloud/internal/state"
 	"github.com/mockcloud/mockcloud/internal/store"
 )
@@ -33,11 +34,12 @@ func servicesMap() map[string]string {
 	return m
 }
 
-// Deps is what route modules need — the store plus disk-root config for
-// reset's wipe semantics.
+// Deps is what route modules need — the store, disk-root config for reset's
+// wipe semantics, and the Lambda service (internal-invoke test hook).
 type Deps struct {
-	Store *store.Store
-	Cfg   *config.Config
+	Store  *store.Store
+	Cfg    *config.Config
+	Lambda *lambda.Service
 }
 
 func RegisterStatusRoutes(rt *Router, d Deps) {
