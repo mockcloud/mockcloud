@@ -42,3 +42,38 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node scripts/conformance.mjs --all --strict --server "node src/index.js"
+
+  go-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: false
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go test ./...
+
+  # The ratchet: every file in conformance/passing.json must pass against the
+  # Go server. Porting PRs append their files; once green, always green.
+  conformance-go:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    name: conformance vs go (${{ matrix.os }})
+    needs: go-check
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: false
+      - run: npm ci
+      - run: node scripts/conformance.mjs --ci

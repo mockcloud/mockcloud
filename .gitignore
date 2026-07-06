@@ -24,3 +24,6 @@ npm-debug.log*
 # MockCloud runtime data (if any state gets written to disk)
 data/
 *.db
+
+# Go build output (scripts/conformance.mjs builds here)
+bin/

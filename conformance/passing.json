@@ -1,1 +1,4 @@
-[]
+[
+  "control-plane.test.js",
+  "error-boundary.test.js"
+]
