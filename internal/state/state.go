@@ -160,6 +160,11 @@ type IAMState struct {
 	Policies         map[string]any   `json:"policies"`
 	AccessKeys       map[string]string `json:"accessKeys"`
 	IdentityPolicies map[string]any   `json:"identityPolicies"`
+	// Created lazily by the first CreateAccessKey with a UserName (Node's
+	// spread-assign added the property only then) — maps AccessKeyId →
+	// UserName for SigV4 principal resolution (M9). omitempty matches the
+	// absent-until-created snapshot shape.
+	AccessKeyOwners map[string]string `json:"accessKeyOwners,omitempty"`
 }
 
 type SNSState struct {

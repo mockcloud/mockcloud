@@ -13,10 +13,13 @@ import (
 	"github.com/mockcloud/mockcloud/internal/protocol/respond"
 	"github.com/mockcloud/mockcloud/internal/services/cloudwatch"
 	"github.com/mockcloud/mockcloud/internal/services/dynamodb"
+	"github.com/mockcloud/mockcloud/internal/services/ec2"
 	"github.com/mockcloud/mockcloud/internal/services/eventbridge"
+	"github.com/mockcloud/mockcloud/internal/services/iam"
 	"github.com/mockcloud/mockcloud/internal/services/lambda"
 	"github.com/mockcloud/mockcloud/internal/services/logs"
 	"github.com/mockcloud/mockcloud/internal/services/s3"
+	"github.com/mockcloud/mockcloud/internal/services/secretsmanager"
 	"github.com/mockcloud/mockcloud/internal/services/ses"
 	"github.com/mockcloud/mockcloud/internal/services/sns"
 	"github.com/mockcloud/mockcloud/internal/services/sqs"
@@ -51,9 +54,12 @@ type Dispatcher struct {
 	ebSvc     *eventbridge.Service
 	sfnSvc    *stepfunctions.Service
 	sesSvc    *ses.Service
+	ec2Svc    *ec2.Service
+	iamSvc    *iam.Service
+	smSvc     *secretsmanager.Service
 }
 
-func New(st *store.Store, cfg *config.Config, lambdaSvc *lambda.Service, s3Svc *s3.Service, ddbSvc *dynamodb.Service, ebSvc *eventbridge.Service, sesSvc *ses.Service) *Dispatcher {
+func New(st *store.Store, cfg *config.Config, lambdaSvc *lambda.Service, s3Svc *s3.Service, ddbSvc *dynamodb.Service, ebSvc *eventbridge.Service, sesSvc *ses.Service, ec2Svc *ec2.Service, iamSvc *iam.Service, smSvc *secretsmanager.Service) *Dispatcher {
 	snsSvc := sns.New(st, lambdaSvc)
 	sfnSvc := stepfunctions.New(st)
 
@@ -126,6 +132,9 @@ func New(st *store.Store, cfg *config.Config, lambdaSvc *lambda.Service, s3Svc *
 		ebSvc:     ebSvc,
 		sfnSvc:    sfnSvc,
 		sesSvc:    sesSvc,
+		ec2Svc:    ec2Svc,
+		iamSvc:    iamSvc,
+		smSvc:     smSvc,
 	}
 }
 
@@ -171,11 +180,11 @@ func (d *Dispatcher) Dispatch(w http.ResponseWriter, r *httpapi.Request) {
 	case strings.HasPrefix(target, "AmazonSimpleEmailService") || has(sesActions, action):
 		d.sesSvc.Handler(w, r)
 	case strings.HasPrefix(target, "secretsmanager.") || strings.Contains(target, "SecretsManager"):
-		notPorted(w, r, "Secrets Manager", "M8")
+		d.smSvc.Handler(w, r)
 	case has(iamActions, action):
-		notPorted(w, r, "IAM/STS", "M8")
+		d.iamSvc.Handler(w, r)
 	case has(ec2Actions, action):
-		notPorted(w, r, "EC2", "M8")
+		d.ec2Svc.Handler(w, r)
 	case has(sqsActions, action) || strings.HasPrefix(target, "AmazonSQS."):
 		sqs.Handler(w, r, d.st)
 	case strings.HasPrefix(target, "GraniteServiceVersion20100801."):

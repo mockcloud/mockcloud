@@ -19,9 +19,12 @@ import (
 	"github.com/mockcloud/mockcloud/internal/httpapi"
 	"github.com/mockcloud/mockcloud/internal/protocol/respond"
 	"github.com/mockcloud/mockcloud/internal/services/dynamodb"
+	"github.com/mockcloud/mockcloud/internal/services/ec2"
 	"github.com/mockcloud/mockcloud/internal/services/eventbridge"
+	"github.com/mockcloud/mockcloud/internal/services/iam"
 	"github.com/mockcloud/mockcloud/internal/services/lambda"
 	"github.com/mockcloud/mockcloud/internal/services/s3"
+	"github.com/mockcloud/mockcloud/internal/services/secretsmanager"
 	"github.com/mockcloud/mockcloud/internal/services/ses"
 	"github.com/mockcloud/mockcloud/internal/state"
 	"github.com/mockcloud/mockcloud/internal/store"
@@ -38,20 +41,27 @@ func main() {
 	ddbSvc.HydrateFromDisk(false) // tables snapshot survives restarts too
 	ebSvc := eventbridge.New(st)
 	sesSvc := ses.New(st, cfg)
-	disp := dispatch.New(st, cfg, lambdaSvc, s3Svc, ddbSvc, ebSvc, sesSvc)
+	ec2Svc := ec2.New(st)
+	iamSvc := iam.New(st)
+	smSvc := secretsmanager.New(st)
+	disp := dispatch.New(st, cfg, lambdaSvc, s3Svc, ddbSvc, ebSvc, sesSvc, ec2Svc, iamSvc, smSvc)
 
+	// /mockcloud/* control plane — registration follows src/routes/index.js
+	// order (status, s3, dynamo, lambda, ec2, secrets, iam, terminal, ses).
 	router := &controlplane.Router{}
 	deps := controlplane.Deps{Store: st, Cfg: cfg, Lambda: lambdaSvc, DDB: ddbSvc}
+	add := func(method, pattern string, h func(http.ResponseWriter, *httpapi.Request)) {
+		router.Add(method, pattern, h)
+	}
 	controlplane.RegisterStatusRoutes(router, deps)
-	ddbSvc.RegisterUIRoutes(func(method, pattern string, h func(http.ResponseWriter, *httpapi.Request)) {
-		router.Add(method, pattern, h)
-	})
-	lambdaSvc.RegisterUIRoutes(func(method, pattern string, h func(http.ResponseWriter, *httpapi.Request)) {
-		router.Add(method, pattern, h)
-	})
-	sesSvc.RegisterUIRoutes(func(method, pattern string, h func(http.ResponseWriter, *httpapi.Request)) {
-		router.Add(method, pattern, h)
-	})
+	controlplane.RegisterS3UIRoutes(router, deps)
+	ddbSvc.RegisterUIRoutes(add)
+	lambdaSvc.RegisterUIRoutes(add)
+	ec2Svc.RegisterUIRoutes(add)
+	smSvc.RegisterUIRoutes(add)
+	iamSvc.RegisterUIRoutes(add)
+	controlplane.RegisterTerminalRoutes(router, deps)
+	sesSvc.RegisterUIRoutes(add)
 	if cfg.TestEndpoints {
 		controlplane.RegisterTestRoutes(router, deps, ebSvc)
 	}

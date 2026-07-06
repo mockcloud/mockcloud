@@ -1,8 +1,10 @@
 [
+  "audit-fixes.test.js",
   "cloudwatch.test.js",
   "control-plane.test.js",
   "dynamodb-sdk.test.js",
   "dynamodb.test.js",
+  "ec2.test.js",
   "error-boundary.test.js",
   "eventbridge-schedule.test.js",
   "lambda-depth.test.js",
@@ -14,6 +16,7 @@
   "s3-multipart.test.js",
   "s3-notifications.test.js",
   "s3.test.js",
+  "security.test.js",
   "ses.test.js",
   "sns-depth.test.js",
   "sns.test.js",
