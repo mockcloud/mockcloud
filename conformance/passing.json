@@ -6,5 +6,9 @@
   "logs.test.js",
   "s3-dataplane.test.js",
   "s3-multipart.test.js",
-  "s3.test.js"
+  "s3.test.js",
+  "sqs-dlq.test.js",
+  "sqs-fifo.test.js",
+  "sqs-messaging.test.js",
+  "sqs.test.js"
 ]

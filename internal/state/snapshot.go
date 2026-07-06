@@ -198,16 +198,17 @@ func (s *State) Import(data []byte) error {
 		}
 	}
 
-	// SQS post-import normalization (src/store.js:165-169).
+	// SQS post-import normalization (src/store.js:165-169): visibility-timer
+	// state doesn't survive serialization — surface every message so it's
+	// redeliverable (at-least-once), and drop the dedupe window.
 	for _, q := range s.SQS.Queues {
 		if q.Messages == nil {
-			q.Messages = []map[string]any{}
+			q.Messages = []*Message{}
 		}
 		q.Dedupe = nil
 		for _, m := range q.Messages {
-			delete(m, "_visTimer")
-			m["visible"] = true
-			delete(m, "visibleAt") // lazy-deadline field: surfaced now
+			m.Visible = true
+			m.VisibleAt = 0
 		}
 	}
 	return nil

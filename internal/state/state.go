@@ -173,12 +173,35 @@ type Queue struct {
 	Arn        string            `json:"arn"`
 	Type       string            `json:"type"` // "standard" | "fifo"
 	Attributes map[string]string `json:"attributes"`
-	Messages   []map[string]any  `json:"messages"`
+	Messages   []*Message        `json:"messages"`
 	Created    int64             `json:"created"`
 	Seq        int64             `json:"seq,omitempty"`
 	// FIFO dedupe window — in-memory only, never serialized (Node stripped the
 	// Map in export and deleted it on import; enqueue rebuilds it lazily).
-	Dedupe map[string]any `json:"-"`
+	Dedupe map[string]DedupeEntry `json:"-"`
+}
+
+// Message replaces Node's per-message setTimeout visibility with a lazy
+// deadline: VisibleAt (never serialized — the export/import contract is the
+// computed `visible` bool, like Node's stripped _visTimer). Visibility is
+// surfaced at read time (see the sqs service's surfaceExpired).
+type Message struct {
+	ID                 string         `json:"id"`
+	ReceiptHandle      string         `json:"receiptHandle"`
+	Body               string         `json:"body"`
+	Sent               int64          `json:"sent"`
+	Visible            bool           `json:"visible"`
+	DedupeID           *string        `json:"dedupeId"`
+	ApproxReceiveCount int            `json:"approxReceiveCount"`
+	MessageAttributes  map[string]any `json:"messageAttributes"`
+	GroupID            string         `json:"groupId,omitempty"`        // FIFO only
+	SequenceNumber     string         `json:"sequenceNumber,omitempty"` // FIFO only
+	VisibleAt          int64          `json:"-"`                        // 0 = no pending restore
+}
+
+type DedupeEntry struct {
+	Msg *Message
+	T   int64
 }
 
 type SecretsState struct {
