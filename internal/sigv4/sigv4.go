@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/mockcloud/mockcloud/internal/httpapi"
+	"github.com/mockcloud/mockcloud/internal/jsnum"
 	"github.com/mockcloud/mockcloud/internal/protocol/respond"
 	"github.com/mockcloud/mockcloud/internal/state"
 	"github.com/mockcloud/mockcloud/internal/store"
@@ -75,6 +76,19 @@ func invalidKey(accessKeyID string) *Error {
 	return &Error{"InvalidAccessKeyId", "The AWS Access Key Id (" + accessKeyID + ") you provided does not exist in our records."}
 }
 
+// scopeSegments splits a credential scope into its first four segments —
+// JS array destructuring semantics ("" for missing segments).
+func scopeSegments(cred string) (akid, dateStamp, region, service string) {
+	scope := strings.Split(cred, "/")
+	seg := func(i int) string {
+		if i < len(scope) {
+			return scope[i]
+		}
+		return ""
+	}
+	return seg(0), seg(1), seg(2), seg(3)
+}
+
 var (
 	credRe = regexp.MustCompile(`Credential=([^,\s]+)`)
 	shRe   = regexp.MustCompile(`SignedHeaders=([^,\s]+)`)
@@ -88,11 +102,9 @@ func verifyHeaderAuth(r *httpapi.Request, st *store.Store, auth string) *Error {
 	if cred == "" || signedHeaders == "" || signature == "" {
 		return &Error{"IncompleteSignature", "Authorization header requires Credential, SignedHeaders and Signature."}
 	}
-	scope := strings.Split(cred, "/") // akid/date/region/service/aws4_request
-	if len(scope) < 4 {
-		return &Error{"IncompleteSignature", "Authorization header requires Credential, SignedHeaders and Signature."}
-	}
-	accessKeyID, dateStamp, region, service := scope[0], scope[1], scope[2], scope[3]
+	// akid/date/region/service/aws4_request — Node destructures with undefined
+	// for missing segments (short scopes still hit the akid lookup below).
+	accessKeyID, dateStamp, region, service := scopeSegments(cred)
 	secret, ok := lookupSecret(st, accessKeyID)
 	if !ok {
 		return invalidKey(accessKeyID)
@@ -113,21 +125,24 @@ func verifyHeaderAuth(r *httpapi.Request, st *store.Store, auth string) *Error {
 func verifyPresigned(r *httpapi.Request, st *store.Store) *Error {
 	q := r.Query
 	cred := q.Get("X-Amz-Credential")
-	scope := strings.Split(cred, "/")
-	if len(scope) < 4 {
-		return invalidKey("")
-	}
-	accessKeyID, dateStamp, region, service := scope[0], scope[1], scope[2], scope[3]
+	accessKeyID, dateStamp, region, service := scopeSegments(cred)
 	secret, ok := lookupSecret(st, accessKeyID)
 	if !ok {
 		return invalidKey(accessKeyID)
 	}
 	signedMs := parseAmzDate(q.Get("X-Amz-Date"))
-	expires, _ := strconv.Atoi(q.Get("X-Amz-Expires"))
+	// Node: parseInt(q.get('X-Amz-Expires') || '0', 10) — digit-prefix parse;
+	// NaN comparisons are false in Go exactly like JS, so a non-numeric value
+	// passes both the <=0 gate and the expiry check (Node quirk, kept).
+	expStr := q.Get("X-Amz-Expires")
+	if expStr == "" {
+		expStr = "0"
+	}
+	expires := jsnum.ParseIntPrefix(expStr)
 	if signedMs == 0 || expires <= 0 {
 		return &Error{"AuthorizationQueryParametersError", "Invalid X-Amz-Date or X-Amz-Expires"}
 	}
-	if state.NowMs() > signedMs+int64(expires)*1000 {
+	if float64(state.NowMs()) > float64(signedMs)+expires*1000 {
 		return &Error{"AccessDenied", "Request has expired"}
 	}
 	signedHeaders := q.Get("X-Amz-SignedHeaders")

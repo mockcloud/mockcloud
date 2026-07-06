@@ -211,6 +211,7 @@ func (m *Manager) ExecCommand(sessionID, command string) error {
 	name, args, env := buildCommand(command)
 	proc := exec.Command(name, args...)
 	proc.Env = env
+	hideWindow(proc) // Node: windowsHide: true
 	stdout, _ := proc.StdoutPipe()
 	stderr, _ := proc.StderrPipe()
 	s.mu.Lock()

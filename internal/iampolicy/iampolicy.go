@@ -399,6 +399,11 @@ func normalizeStatements(doc string) []map[string]any {
 }
 
 func normalizeStatementsAny(doc any) []map[string]any {
+	// Node: `typeof doc === 'string' ? safeJson(doc) : doc` — identity policies
+	// may be stored as JSON strings (the control plane accepts either shape).
+	if s, ok := doc.(string); ok {
+		return normalizeStatements(s)
+	}
 	d, ok := doc.(map[string]any)
 	if !ok {
 		return nil

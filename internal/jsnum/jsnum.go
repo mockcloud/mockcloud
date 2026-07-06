@@ -123,6 +123,10 @@ func trimJS(s string) string {
 // Trim is String.prototype.trim (JS whitespace set).
 func Trim(s string) string { return trimJS(s) }
 
+// IsSpace is the JS regex `\s` class (same set as WhiteSpace+LineTerminator) —
+// for ports of `.split(/(\s+)/)`-style tokenizers.
+func IsSpace(r rune) bool { return isJSSpace(r) }
+
 // ToNumber is JS ToNumber(v): Number('')===0, Number(null)===0,
 // Number(undefined)===NaN, arrays via join, objects → NaN.
 func ToNumber(v any) float64 {
