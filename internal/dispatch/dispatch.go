@@ -11,6 +11,7 @@ import (
 	"github.com/mockcloud/mockcloud/internal/config"
 	"github.com/mockcloud/mockcloud/internal/httpapi"
 	"github.com/mockcloud/mockcloud/internal/protocol/respond"
+	"github.com/mockcloud/mockcloud/internal/services/bedrock"
 	"github.com/mockcloud/mockcloud/internal/services/cloudwatch"
 	"github.com/mockcloud/mockcloud/internal/services/dynamodb"
 	"github.com/mockcloud/mockcloud/internal/services/ec2"
@@ -54,12 +55,13 @@ type Dispatcher struct {
 	ebSvc     *eventbridge.Service
 	sfnSvc    *stepfunctions.Service
 	sesSvc    *ses.Service
-	ec2Svc    *ec2.Service
-	iamSvc    *iam.Service
-	smSvc     *secretsmanager.Service
+	ec2Svc     *ec2.Service
+	iamSvc     *iam.Service
+	smSvc      *secretsmanager.Service
+	bedrockSvc *bedrock.Service
 }
 
-func New(st *store.Store, cfg *config.Config, lambdaSvc *lambda.Service, s3Svc *s3.Service, ddbSvc *dynamodb.Service, ebSvc *eventbridge.Service, sesSvc *ses.Service, ec2Svc *ec2.Service, iamSvc *iam.Service, smSvc *secretsmanager.Service) *Dispatcher {
+func New(st *store.Store, cfg *config.Config, lambdaSvc *lambda.Service, s3Svc *s3.Service, ddbSvc *dynamodb.Service, ebSvc *eventbridge.Service, sesSvc *ses.Service, ec2Svc *ec2.Service, iamSvc *iam.Service, smSvc *secretsmanager.Service, bedrockSvc *bedrock.Service) *Dispatcher {
 	snsSvc := sns.New(st, lambdaSvc)
 	sfnSvc := stepfunctions.New(st)
 
@@ -132,9 +134,10 @@ func New(st *store.Store, cfg *config.Config, lambdaSvc *lambda.Service, s3Svc *
 		ebSvc:     ebSvc,
 		sfnSvc:    sfnSvc,
 		sesSvc:    sesSvc,
-		ec2Svc:    ec2Svc,
-		iamSvc:    iamSvc,
-		smSvc:     smSvc,
+		ec2Svc:     ec2Svc,
+		iamSvc:     iamSvc,
+		smSvc:      smSvc,
+		bedrockSvc: bedrockSvc,
 	}
 }
 
@@ -190,7 +193,7 @@ func (d *Dispatcher) Dispatch(w http.ResponseWriter, r *httpapi.Request) {
 	case strings.HasPrefix(target, "GraniteServiceVersion20100801."):
 		cloudwatch.Handler(w, r, d.st)
 	case strings.HasPrefix(path, "/model/") || strings.HasPrefix(path, "/guardrail/"):
-		notPorted(w, r, "Bedrock", "M10")
+		d.bedrockSvc.Handler(w, r)
 	default:
 		d.s3Svc.Handler(w, r)
 	}

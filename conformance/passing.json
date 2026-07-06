@@ -1,5 +1,6 @@
 [
   "audit-fixes.test.js",
+  "bedrock.test.js",
   "cloudwatch.test.js",
   "control-plane.test.js",
   "dynamodb-sdk.test.js",
@@ -18,6 +19,7 @@
   "s3-multipart.test.js",
   "s3-notifications.test.js",
   "s3.test.js",
+  "security-terminal.test.js",
   "security.test.js",
   "ses.test.js",
   "sigv4.test.js",

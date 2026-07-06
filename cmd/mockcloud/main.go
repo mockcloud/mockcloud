@@ -19,6 +19,7 @@ import (
 	"github.com/mockcloud/mockcloud/internal/httpapi"
 	"github.com/mockcloud/mockcloud/internal/iampolicy"
 	"github.com/mockcloud/mockcloud/internal/protocol/respond"
+	"github.com/mockcloud/mockcloud/internal/services/bedrock"
 	"github.com/mockcloud/mockcloud/internal/services/dynamodb"
 	"github.com/mockcloud/mockcloud/internal/services/ec2"
 	"github.com/mockcloud/mockcloud/internal/services/eventbridge"
@@ -46,7 +47,8 @@ func main() {
 	ec2Svc := ec2.New(st)
 	iamSvc := iam.New(st)
 	smSvc := secretsmanager.New(st)
-	disp := dispatch.New(st, cfg, lambdaSvc, s3Svc, ddbSvc, ebSvc, sesSvc, ec2Svc, iamSvc, smSvc)
+	bedrockSvc := bedrock.New(st)
+	disp := dispatch.New(st, cfg, lambdaSvc, s3Svc, ddbSvc, ebSvc, sesSvc, ec2Svc, iamSvc, smSvc, bedrockSvc)
 
 	// Opt-in security middleware (src/index.js: SigV4 then IAM, before dispatch).
 	sigv4Enabled := cfg.VerifySigV4
@@ -79,6 +81,7 @@ func main() {
 	iamSvc.RegisterUIRoutes(add)
 	controlplane.RegisterTerminalRoutes(router, deps)
 	sesSvc.RegisterUIRoutes(add)
+	bedrockSvc.RegisterUIRoutes(add)
 	if cfg.TestEndpoints {
 		controlplane.RegisterTestRoutes(router, deps, ebSvc)
 	}
