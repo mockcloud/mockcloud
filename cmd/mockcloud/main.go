@@ -42,6 +42,9 @@ func main() {
 	ddbSvc.RegisterUIRoutes(func(method, pattern string, h func(http.ResponseWriter, *httpapi.Request)) {
 		router.Add(method, pattern, h)
 	})
+	lambdaSvc.RegisterUIRoutes(func(method, pattern string, h func(http.ResponseWriter, *httpapi.Request)) {
+		router.Add(method, pattern, h)
+	})
 	if cfg.TestEndpoints {
 		controlplane.RegisterTestRoutes(router, deps)
 	}
@@ -106,9 +109,10 @@ func main() {
 	}
 	fmt.Printf("MOCKCLOUD_READY endpoint=http://%s:%d\n", readyHost, boundPort)
 
-	// ── Background ticks (SQS→Lambda ESM lands M6, schedules M7) ─────────
+	// ── Background ticks (EventBridge schedules land M7) ─────────────────
 	ticker := background.New(cfg.PollIntervalMs)
 	ticker.Register(cloudWatchCollector(st))
+	ticker.Register(lambdaSvc.PollEventSourceMappingsOnce) // SQS→Lambda ESM
 	ticker.Start()
 
 	// ── Orphan protection: exit when the supervising pipe closes ─────────

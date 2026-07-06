@@ -126,6 +126,9 @@ type DynamoDBState struct {
 
 type LambdaState struct {
 	Functions map[string]*LambdaFn `json:"functions"`
+	// Created lazily by the first CreateEventSourceMapping (Node's ||= — the
+	// factory has no key until then). Mapping objects keep AWS PascalCase.
+	EventSourceMappings map[string]map[string]any `json:"eventSourceMappings,omitempty"`
 }
 
 type LambdaFn struct {
@@ -160,7 +163,29 @@ type IAMState struct {
 }
 
 type SNSState struct {
-	Topics map[string]any `json:"topics"`
+	Topics map[string]*Topic `json:"topics"`
+}
+
+type Topic struct {
+	Name          string            `json:"name"`
+	Arn           string            `json:"arn"`
+	Created       int64             `json:"created"`
+	Published     int64             `json:"published"`
+	Subscriptions []*Subscription   `json:"subscriptions"`
+	Attributes    map[string]string `json:"attributes"`
+}
+
+type Subscription struct {
+	SubArn   string `json:"subArn"`
+	TopicArn string `json:"topicArn"`
+	Protocol string `json:"protocol"`
+	Endpoint string `json:"endpoint"`
+	Status   string `json:"status"`
+	Owner    string `json:"owner"`
+	// Set lazily by Subscribe attributes / SetSubscriptionAttributes.
+	FilterPolicy       *string `json:"filterPolicy,omitempty"`
+	FilterPolicyScope  string  `json:"filterPolicyScope,omitempty"`
+	RawMessageDelivery bool    `json:"rawMessageDelivery,omitempty"`
 }
 
 type SQSState struct {
@@ -330,7 +355,7 @@ func NewIAM() *IAMState {
 		IdentityPolicies: map[string]any{},
 	}
 }
-func NewSNS() *SNSState     { return &SNSState{Topics: map[string]any{}} }
+func NewSNS() *SNSState     { return &SNSState{Topics: map[string]*Topic{}} }
 func NewSQS() *SQSState     { return &SQSState{Queues: map[string]*Queue{}} }
 func NewSecrets() *SecretsState {
 	return &SecretsState{Secrets: map[string]any{}}

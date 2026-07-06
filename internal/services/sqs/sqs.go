@@ -152,6 +152,12 @@ func EnqueueJSONLocked(s *state.State, queueURL, body string) *state.Message {
 	return EnqueueLocked(s, queueURL, body, enqueueOpts{})
 }
 
+// EnqueueWithAttributesLocked — SNS RawMessageDelivery: the bare message
+// carrying the original attributes.
+func EnqueueWithAttributesLocked(s *state.State, queueURL, body string, attributes map[string]any) *state.Message {
+	return EnqueueLocked(s, queueURL, body, enqueueOpts{attributes: attributes})
+}
+
 func leftPad(s string, n int) string {
 	for len(s) < n {
 		s = "0" + s
@@ -715,6 +721,27 @@ func queueExists(st *store.Store, qurl string) bool {
 	var ok bool
 	st.With(func(s *state.State) { ok = s.SQS.Queues[qurl] != nil })
 	return ok
+}
+
+// ── Lock-held exports for the Lambda ESM poller (lambda-esm.js) ─────────────
+
+// SelectMessagesLocked — selectMessages (applies redrive + FIFO group locking).
+func SelectMessagesLocked(s *state.State, q *state.Queue, maxMsgs int) []*state.Message {
+	return selectMessages(s, q, maxMsgs)
+}
+
+// HideMessageLocked — hideMessage (bumps receive count, hides for ms).
+func HideMessageLocked(m *state.Message, ms int64) { hideMessage(m, ms) }
+
+// RemoveByHandlesLocked deletes every message whose receipt handle is in the set.
+func RemoveByHandlesLocked(q *state.Queue, handles map[string]struct{}) {
+	var kept []*state.Message
+	for _, m := range q.Messages {
+		if _, drop := handles[m.ReceiptHandle]; !drop {
+			kept = append(kept, m)
+		}
+	}
+	q.Messages = kept
 }
 
 func findByHandle(q *state.Queue, handle string) *state.Message {

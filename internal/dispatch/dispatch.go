@@ -17,6 +17,7 @@ import (
 	"github.com/mockcloud/mockcloud/internal/services/lambda"
 	"github.com/mockcloud/mockcloud/internal/services/logs"
 	"github.com/mockcloud/mockcloud/internal/services/s3"
+	"github.com/mockcloud/mockcloud/internal/services/sns"
 	"github.com/mockcloud/mockcloud/internal/services/sqs"
 	"github.com/mockcloud/mockcloud/internal/state"
 	"github.com/mockcloud/mockcloud/internal/store"
@@ -44,26 +45,54 @@ type Dispatcher struct {
 	lambdaSvc *lambda.Service
 	logsSvc   *logs.Service
 	ddbSvc    *dynamodb.Service
+	snsSvc    *sns.Service
 }
 
 func New(st *store.Store, cfg *config.Config, lambdaSvc *lambda.Service, s3Svc *s3.Service, ddbSvc *dynamodb.Service) *Dispatcher {
-	// S3 notification delivery (fire-and-forget, outside the store lock).
-	// Lambda targets work now; SQS lands in M5, SNS in M6.
+	snsSvc := sns.New(st, lambdaSvc)
+
+	// S3 notification delivery (fire-and-forget, outside the store lock) —
+	// port of deliverNotification (src/services/s3.js).
 	s3Svc.Deliver = func(nc state.NotifConfig, event map[string]any) {
+		payload := string(respond.Marshal(event))
 		switch nc.Type {
 		case "lambda":
 			parts := strings.Split(nc.Arn, ":")
-			lambdaSvc.Invoke(parts[len(parts)-1], string(respond.Marshal(event)), "s3", "")
-		case "sqs": // M5
-		case "sns": // M6
+			lambdaSvc.Invoke(parts[len(parts)-1], payload, "s3", "")
+		case "sqs":
+			qurl := sqs.QueueURLForArn(nc.Arn)
+			st.With(func(s *state.State) {
+				if qurl != "" && s.SQS.Queues[qurl] != nil {
+					sqs.EnqueueJSONLocked(s, qurl, payload)
+				}
+			})
+		case "sns":
+			var exists bool
+			st.With(func(s *state.State) {
+				if t := s.SNS.Topics[nc.Arn]; t != nil {
+					t.Published++
+					exists = true
+				}
+			})
+			if exists {
+				snsSvc.Fanout(nc.Arn, state.RandomID(36), payload, "Amazon S3 Notification", nil)
+			}
 		}
 	}
+
+	// DynamoDB-stream Lambda triggers (fireLambdaTriggers) — already invoked
+	// in a goroutine off the store lock by the streams emitter.
+	ddbSvc.InvokeTrigger = func(fnName string, event map[string]any) {
+		lambdaSvc.Invoke(fnName, string(respond.Marshal(event)), "dynamodb-stream", "")
+	}
+
 	return &Dispatcher{
 		st: st, cfg: cfg,
 		s3Svc:     s3Svc,
 		lambdaSvc: lambdaSvc,
 		logsSvc:   logs.New(st, cfg),
 		ddbSvc:    ddbSvc,
+		snsSvc:    snsSvc,
 	}
 }
 
@@ -105,7 +134,7 @@ func (d *Dispatcher) Dispatch(w http.ResponseWriter, r *httpapi.Request) {
 		strings.HasPrefix(path, "/2020-06-30/functions") || strings.HasPrefix(path, "/2020-06-30/event-source-mappings"):
 		d.lambdaSvc.Handler(w, r)
 	case strings.HasPrefix(target, "AmazonSimpleNotificationService") || has(snsActions, action):
-		notPorted(w, r, "SNS", "M6")
+		d.snsSvc.Handler(w, r)
 	case strings.HasPrefix(target, "AmazonSimpleEmailService") || has(sesActions, action):
 		notPorted(w, r, "SES", "M7")
 	case strings.HasPrefix(target, "secretsmanager.") || strings.Contains(target, "SecretsManager"):

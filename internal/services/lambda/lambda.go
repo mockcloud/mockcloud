@@ -6,7 +6,9 @@
 package lambda
 
 import (
+	"crypto/md5"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -72,12 +74,12 @@ func (l *Service) Handler(w http.ResponseWriter, r *httpapi.Request) {
 	if len(parts) > 3 {
 		action = parts[3]
 	}
+	payload := r.JSONBody()
+
 	if len(parts) > 1 && parts[1] == "event-source-mappings" {
-		respond.ErrorJSON(w, 400, "NotImplemented", "MockCloud Go port: event-source mappings not yet ported (M6)")
+		l.handleEventSourceMappings(w, r, parts, payload)
 		return
 	}
-
-	payload := r.JSONBody()
 
 	switch {
 	// ── List functions ──────────────────────────────────────────────────
@@ -230,9 +232,143 @@ func (l *Service) Handler(w http.ResponseWriter, r *httpapi.Request) {
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte(outcome.Result))
 
+	// ── Upload code (PUT /code) ──────────────────────────────────────────
+	case r.Method == "PUT" && fnName != "" && action == "code":
+		var cfg map[string]any
+		l.st.With(func(s *state.State) {
+			fn := s.Lambda.Functions[fnName]
+			if fn == nil {
+				return
+			}
+			code := decodeUploadedCode(anyMap(payload))
+			if code == "" {
+				raw := string(r.RawBody)
+				if len(raw) > 10240 {
+					raw = raw[:10240]
+				}
+				code = raw
+			}
+			fn.Code = code
+			cfg = fnConfig(fn)
+		})
+		if cfg == nil {
+			respond.ErrorJSON(w, 404, "ResourceNotFoundException", "Function not found: "+fnName)
+			return
+		}
+		respond.JSON(w, 200, cfg)
+
+	// ── Get / update function configuration ──────────────────────────────
+	case fnName != "" && action == "configuration" && (r.Method == "GET" || r.Method == "PUT"):
+		var cfg map[string]any
+		l.st.With(func(s *state.State) {
+			fn := s.Lambda.Functions[fnName]
+			if fn == nil {
+				return
+			}
+			if r.Method == "PUT" {
+				if v, ok := httpapi.Num(payload, "MemorySize"); ok {
+					fn.Memory = v
+				}
+				if v, ok := httpapi.Num(payload, "Timeout"); ok {
+					fn.Timeout = v
+				}
+				if _, ok := payload["Handler"]; ok {
+					fn.Handler = httpapi.Str(payload, "Handler")
+				}
+				if _, ok := payload["Runtime"]; ok {
+					fn.Runtime = httpapi.Str(payload, "Runtime")
+				}
+				if _, ok := payload["Role"]; ok {
+					fn.Role = httpapi.Str(payload, "Role")
+				}
+				if e, ok := payload["Environment"].(map[string]any); ok {
+					if vars, ok := e["Variables"].(map[string]any); ok {
+						env := map[string]string{}
+						for k, v := range vars {
+							if sv, ok := v.(string); ok {
+								env[k] = sv
+							}
+						}
+						fn.Env = env
+					}
+				}
+				if layers, ok := payload["Layers"].([]any); ok {
+					fn.Layers = layers
+				}
+			}
+			cfg = fnConfig(fn)
+		})
+		if cfg == nil {
+			respond.ErrorJSON(w, 404, "ResourceNotFoundException", "Function not found: "+fnName)
+			return
+		}
+		respond.JSON(w, 200, cfg)
+
+	// ── List versions ────────────────────────────────────────────────────
+	case r.Method == "GET" && fnName != "" && action == "versions":
+		var cfg map[string]any
+		l.st.With(func(s *state.State) {
+			if fn := s.Lambda.Functions[fnName]; fn != nil {
+				cfg = fnConfig(fn)
+			}
+		})
+		if cfg == nil {
+			respond.ErrorJSON(w, 404, "ResourceNotFoundException", "Function not found: "+fnName)
+			return
+		}
+		cfg["Version"] = "$LATEST"
+		respond.JSON(w, 200, map[string]any{"Versions": []any{cfg}, "NextMarker": nil})
+
+	// ── Code signing config (200 with empty ARN — provider crashes on 404) ─
+	case fnName != "" && action == "code-signing-config":
+		respond.JSON(w, 200, map[string]any{"CodeSigningConfigArn": "", "FunctionName": fnName})
+
+	case r.Method == "GET" && fnName != "" && action == "concurrency":
+		respond.JSON(w, 200, map[string]any{"ReservedConcurrentExecutions": -1})
+
+	case r.Method == "GET" && fnName != "" && action == "policy":
+		respond.ErrorJSON(w, 404, "ResourceNotFoundException", "No policy for function: "+fnName)
+
+	// Broad catch: unknown GET sub-resource under a function → JSON 404.
+	case r.Method == "GET" && fnName != "" && action != "":
+		respond.ErrorJSON(w, 404, "ResourceNotFoundException", "Unsupported sub-resource: "+action)
+
 	default:
-		respond.ErrorJSON(w, 400, "NotImplemented", "MockCloud Go port: Lambda operation not yet ported")
+		respond.ErrorJSON(w, 400, "UnknownOperation", "Unknown Lambda operation: "+r.Method+" "+r.URL.EscapedPath())
 	}
+}
+
+// anyMap passes a parsed JSON body straight through (decodeUploadedCode's
+// payload IS the Code document on PUT /code, unlike CreateFunction where it
+// nests under payload.Code).
+func anyMap(m map[string]any) any {
+	if len(m) == 0 {
+		return nil
+	}
+	return m
+}
+
+// RegisterUIRoutes adds the /mockcloud/lambda/* control-plane routes
+// (src/routes/lambda.js) via a callback, mirroring the DynamoDB pattern.
+func (l *Service) RegisterUIRoutes(add func(method, pattern string, h func(http.ResponseWriter, *httpapi.Request))) {
+	add("GET", "/mockcloud/lambda/functions", func(w http.ResponseWriter, r *httpapi.Request) {
+		fns := []map[string]any{}
+		l.st.With(func(s *state.State) {
+			for _, f := range s.Lambda.Functions {
+				var lastInvoked any
+				if f.LastInvoked != nil {
+					lastInvoked = *f.LastInvoked
+				}
+				fns = append(fns, map[string]any{
+					"name": f.Name, "runtime": f.Runtime, "handler": f.Handler,
+					"memory": f.Memory, "timeout": f.Timeout,
+					"invocations": f.Invocations, "errors": f.Errors,
+					"created": f.Created, "lastInvoked": lastInvoked,
+				})
+			}
+		})
+		respond.JSON(w, 200, map[string]any{"functions": fns})
+	})
 }
 
 // Outcome mirrors invokeLambda's return object.
@@ -258,7 +394,7 @@ func (l *Service) Invoke(fnName, eventStr, source, requestID string) Outcome {
 	// `aws logs tail` / FilterLogEvents work like real Lambda.
 	logGroup := "/aws/lambda/" + fnName
 	logStream := time.Now().UTC().Format("2006/01/02") + "/[$LATEST]" + requestID
-	var runtime, code string
+	var spec sandboxSpec
 	var found bool
 	l.st.With(func(s *state.State) {
 		fn := s.Lambda.Functions[fnName]
@@ -269,7 +405,10 @@ func (l *Service) Invoke(fnName, eventStr, source, requestID string) Outcome {
 		fn.Invocations++
 		now := state.NowMs()
 		fn.LastInvoked = &now
-		runtime, code = fn.Runtime, fn.Code
+		spec = sandboxSpec{
+			name: fn.Name, code: fn.Code, handler: fn.Handler, runtime: fn.Runtime,
+			timeout: fn.Timeout, memory: fn.Memory, env: fn.Env,
+		}
 		l.logLine(s, fn, logGroup, logStream, "INFO", "START RequestId: "+requestID+" Source: "+sourceOr(source))
 	})
 	if !found {
@@ -277,9 +416,14 @@ func (l *Service) Invoke(fnName, eventStr, source, requestID string) Outcome {
 	}
 
 	var result, errStr string
-	if strings.HasPrefix(runtime, "nodejs") && code != "" {
-		// Real sandbox execution ports in M6 (Node child process).
-		errStr = "MockCloud Go port: nodejs sandbox execution not yet ported (M6)"
+	if strings.HasPrefix(spec.runtime, "nodejs") && spec.code != "" {
+		// Real Node child-process sandbox — runs OUTSIDE the store lock.
+		out, err := runInNodeSandbox(spec, eventStr)
+		if err != nil {
+			errStr = err.Error()
+		} else {
+			result = out
+		}
 	} else {
 		// Synthetic response when no code uploaded or non-Node runtime.
 		var event any
@@ -290,7 +434,7 @@ func (l *Service) Invoke(fnName, eventStr, source, requestID string) Outcome {
 			StatusCode: 200,
 			Body: string(respond.Marshal(orderedSyntheticBody{
 				Message: "invoked (synthetic — no code uploaded)", Function: fnName,
-				Runtime: runtime, Event: event,
+				Runtime: spec.runtime, Event: event,
 			})),
 		}))
 	}
@@ -357,9 +501,11 @@ func decodeUploadedCode(codeField any) string {
 			if err != nil {
 				return ""
 			}
-			// Zip extraction ports in M6 (manual parser — its failure modes are
-			// load-bearing). Until then every upload takes the raw-source
-			// fallback, which is the path all current tests use.
+			// Real zip first; on any parse failure treat the bytes as raw source
+			// (the path most tests use — they send plain JS in ZipFile).
+			if code, ok := extractZip(buf); ok {
+				return code
+			}
 			return cap256(string(buf))
 		}
 	}
@@ -426,6 +572,11 @@ func sourceOr(source string) string {
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
+func respondMD5(s string) string {
+	sum := md5.Sum([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
 
 func jsonUnmarshalAny(s string, v *any) error {
 	dec := json.NewDecoder(strings.NewReader(s))
