@@ -50,7 +50,6 @@ export const api = {
   trail: () => get('/trail'),
   clearTrail: () => del('/trail'),
   reset: (s) => del(s ? `/reset?service=${s}` : '/reset'),
-  export: () => fetch(BASE + '/export').then(r => r.json()),
 
   s3: {
     buckets: () => get('/s3/buckets'),
@@ -79,13 +78,11 @@ export const api = {
     create: (b) => post('/lambda/functions', b),
     delete: (n) => del(`/lambda/functions/${n}`),
     invoke: (n, p) => post(`/lambda/functions/${n}/invoke`, p),
-    logs: (n) => get(`/lambda/functions/${n}/logs`),
   },
   ec2: {
     instances: () => get('/ec2/instances'),
     launch: (b) => post('/ec2/instances', b),
     action: (id, a) => post(`/ec2/instances/${id}/action`, { action: a }),
-    terminate: (id) => del(`/ec2/instances/${id}`),
   },
   sns: {
     topics: () => get('/sns/topics'),
@@ -125,12 +122,9 @@ export const api = {
   },
   cloudwatch: {
     dashboard: () => get('/cloudwatch/dashboard'),
-    metrics: () => get('/cloudwatch/metrics'),
-    metric: (ns, n) => get(`/cloudwatch/metrics/${ns}/${n}`),
-    alarms: () => get('/cloudwatch/alarms'),
   },
   terminal: {
-    create: (t, id) => post('/terminal/sessions', { type: t, instanceId: id }),
+    create: () => post('/terminal/sessions', { type: 'cli' }),
     exec: (s, cmd) => post(`/terminal/sessions/${s}/exec`, { command: cmd }),
     interrupt: (s) => post(`/terminal/sessions/${s}/interrupt`, {}),
     close: (s) => del(`/terminal/sessions/${s}`),

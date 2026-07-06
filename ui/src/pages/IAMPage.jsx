@@ -1,12 +1,7 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Button, Card, Empty, Stat, Status, Breadcrumb, Spinner, MiniChart, RowMenu, Modal, SimpleCreateModal, formatBytes, relTime } from '../components/UI.jsx';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Button, Card, Empty, Stat, Status, Breadcrumb, RowMenu, Modal, relTime } from '../components/UI.jsx';
 import * as Icons from '../components/Icons.jsx';
-import { TerminalView } from '../components/Terminal.jsx';
 import { api } from '../api.js';
-
-function stateKind(s) {
-  return { running:'ok', pending:'pending', stopped:'stopped', terminated:'err' }[s] || 'stopped';
-}
 
 export function IAMPage({ pushToast }) {
   const [tab, setTab] = useState('users');
@@ -115,5 +110,3 @@ function CreateIAMModal({ kind, onClose, onCreate }) {
     </Modal>
   );
 }
-
-// ─── Localwatch ──────────────────────────────────────────────────────────────

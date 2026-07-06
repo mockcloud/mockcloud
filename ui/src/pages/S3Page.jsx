@@ -1,12 +1,7 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Button, Card, Empty, Stat, Status, Breadcrumb, Spinner, MiniChart, RowMenu, Modal, SimpleCreateModal, formatBytes, relTime } from '../components/UI.jsx';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Button, Card, Empty, Status, Breadcrumb, Modal, formatBytes, relTime } from '../components/UI.jsx';
 import * as Icons from '../components/Icons.jsx';
-import { TerminalView } from '../components/Terminal.jsx';
 import { api } from '../api.js';
-
-function stateKind(s) {
-  return { running:'ok', pending:'pending', stopped:'stopped', terminated:'err' }[s] || 'stopped';
-}
 
 export function S3Page({ pushToast }) {
   const [buckets, setBuckets] = useState([]);
@@ -38,7 +33,7 @@ export function S3Page({ pushToast }) {
           <div className="page-title-row">
             <div className="service-icon"><Icons.IconS3 size={20}/></div>
             <div>
-              <h1 className="page-title">Local S3</h1>
+              <h1 className="page-title">S3</h1>
               <p className="page-subtitle">Object storage — buckets persist at <span className="mono">~/.mockcloud/s3</span></p>
             </div>
           </div>
@@ -141,8 +136,8 @@ function S3Detail({ bucket, onBack, pushToast }) {
   }, [bucket.name, refresh, pushToast]);
 
   const onDownload = useCallback((key) => {
-    // Trigger browser download via the GET endpoint
-    const url = `/mockcloud/s3/buckets/${encodeURIComponent(bucket.name)}/object?key=${encodeURIComponent(key)}`;
+    // Trigger browser download via the GET endpoint (BASE-aware: prod serves the UI on :4567, API on :4566)
+    const url = api.s3.download(bucket.name, key);
     const a = document.createElement('a');
     a.href = url;
     a.download = key.split('/').pop();
@@ -230,7 +225,7 @@ function S3Detail({ bucket, onBack, pushToast }) {
             <pre style={{margin:0,fontSize:12}}>{`{\n  "Version": "2012-10-17",\n  "Statement": [\n    { "Effect": "Allow", "Principal": "*",\n      "Action": "s3:GetObject",\n      "Resource": "arn:aws:s3:::${bucket.name}/*" }\n  ]\n}`}</pre>
           </Card>
         )}
-        {tab==='events' && <Empty icon={Icons.IconSNS} title="No event notifications" message="Send events to SNS, SQS, or Lambda on object changes." actions={<Button variant="primary" icon={Icons.IconPlus}>Add notification</Button>}/>}
+        {tab==='events' && <Empty icon={Icons.IconSNS} title="No event notifications" message="Send events to SNS, SQS, or Lambda on object changes."/>}
       </div>
     </>
   );

@@ -1,17 +1,11 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Button, Card, Empty, Stat, Status, Breadcrumb, Spinner, MiniChart, RowMenu, Modal, SimpleCreateModal, formatBytes, relTime } from '../components/UI.jsx';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Button, Card, Empty, Status, Breadcrumb, RowMenu, Modal, relTime } from '../components/UI.jsx';
 import * as Icons from '../components/Icons.jsx';
-import { TerminalView } from '../components/Terminal.jsx';
 import { api } from '../api.js';
-
-function stateKind(s) {
-  return { running:'ok', pending:'pending', stopped:'stopped', terminated:'err' }[s] || 'stopped';
-}
 
 export function SecretsPage({ pushToast }) {
   const [secrets, setSecrets] = useState([]);
   const [showCreate, setShowCreate] = useState(false);
-  const [revealed, setRevealed] = useState({});
 
   const load = useCallback(async()=>{ try { const d=await api.secrets.list(); setSecrets(d.secrets||[]); } catch(e){ pushToast({kind:'err',title:'Secrets error',body:e.message}); } },[]);
   useEffect(()=>{ load(); },[load]);
@@ -41,7 +35,8 @@ export function SecretsPage({ pushToast }) {
                     <td className="mono">{s.rotation}</td>
                     <td><Status kind="ok">encrypted</Status></td>
                     <td><RowMenu items={[
-                      { label:'Copy value', icon:Icons.IconCopy, onClick:()=>{ navigator.clipboard?.writeText(s.name); pushToast({kind:'ok',title:'Copied',body:s.name}); }},
+                      // List endpoint omits the value — fetch it; toast body stays the name so the value never hits the screen
+                      { label:'Copy value', icon:Icons.IconCopy, onClick:async()=>{ try{ if(!navigator.clipboard) throw new Error('Clipboard requires a secure context (https or localhost)'); const d=await api.secrets.get(s.name); await navigator.clipboard.writeText(d.value); pushToast({kind:'ok',title:'Copied',body:s.name}); }catch(e){ pushToast({kind:'err',title:'Copy failed',body:e.message}); } }},
                       'divider',
                       { label:'Delete', icon:Icons.IconX, danger:true, onClick:async()=>{ try{ await api.secrets.delete(s.name); pushToast({kind:'ok',title:'Secret deleted',body:s.name}); load(); }catch(e){pushToast({kind:'err',title:'Error',body:e.message});} }},
                     ]}/></td>

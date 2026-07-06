@@ -1,22 +1,21 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Button, Card, Stat, Spinner, MiniChart, Breadcrumb } from '../components/UI.jsx';
 import * as Icons from '../components/Icons.jsx';
 import { api } from '../api.js';
 
-function stateKind(s) {
-  return { running:'ok', pending:'pending', stopped:'stopped', terminated:'err' }[s] || 'stopped';
-}
-
-export function WatchPage() {
+export function WatchPage({ pushToast }) {
   const [dash, setDash]       = useState(null);
   const [loading, setLoading] = useState(true);
+  const failedRef = useRef(false); // toast only on the ok→err transition, not every failed 30s poll
 
   const load = useCallback(async () => {
     setLoading(true);
-    try { setDash(await api.cloudwatch.dashboard()); }
-    catch(e) { console.error('CloudWatch error', e); }
+    try { setDash(await api.cloudwatch.dashboard()); failedRef.current = false; }
+    catch(e) {
+      if (!failedRef.current) { failedRef.current = true; pushToast?.({ kind:'err', title:'CloudWatch error', body:e.message }); }
+    }
     finally { setLoading(false); }
-  }, []);
+  }, [pushToast]);
 
   useEffect(() => { load(); const t = setInterval(load, 30_000); return () => clearInterval(t); }, [load]);
 

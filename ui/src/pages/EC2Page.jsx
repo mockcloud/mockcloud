@@ -1,7 +1,6 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Button, Card, Empty, Stat, Status, Breadcrumb, Spinner, MiniChart, RowMenu, Modal, SimpleCreateModal, formatBytes, relTime } from '../components/UI.jsx';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Button, Card, Empty, Stat, Status, Breadcrumb, Spinner, RowMenu, Modal, relTime } from '../components/UI.jsx';
 import * as Icons from '../components/Icons.jsx';
-import { TerminalView } from '../components/Terminal.jsx';
 import { api } from '../api.js';
 
 const AMIS = [
@@ -23,7 +22,7 @@ function stateKind(s) {
   return { running: 'ok', pending: 'pending', stopped: 'stopped', terminated: 'err' }[s] || 'stopped';
 }
 
-export function EC2Page({ pushToast, setCurrent, setTerminalTarget }) {
+export function EC2Page({ pushToast }) {
   const [instances, setInstances] = useState([]);
   const [q, setQ] = useState('');
   const [stateFilter, setStateFilter] = useState('all');
@@ -71,7 +70,7 @@ export function EC2Page({ pushToast, setCurrent, setTerminalTarget }) {
           <div className="page-title-row">
             <div className="service-icon"><Icons.IconEC2 size={20} /></div>
             <div>
-              <h1 className="page-title">Local EC2</h1>
+              <h1 className="page-title">EC2</h1>
               <p className="page-subtitle">Emulated virtual servers running on your machine</p>
             </div>
           </div>
@@ -147,7 +146,6 @@ export function EC2Page({ pushToast, setCurrent, setTerminalTarget }) {
                             ? { label: 'Stop', icon: Icons.IconStop, onClick: () => onAction(row.id, 'stop') }
                             : { label: 'Start', icon: Icons.IconPlay, onClick: () => onAction(row.id, 'start') },
                           { label: 'Reboot', icon: Icons.IconRefresh, onClick: () => onAction(row.id, 'reboot') },
-                          { label: 'Connect', icon: Icons.IconTerminal, onClick: () => { setTerminalTarget({ type: 'ec2', instance: row }); setCurrent('terminal'); } },
                           'divider',
                           { label: 'Terminate', icon: Icons.IconX, danger: true, onClick: () => onAction(row.id, 'terminate') },
                         ]} />

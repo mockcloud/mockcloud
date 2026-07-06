@@ -1,4 +1,4 @@
-/* Local Cloud — design tokens (from Nimbus Design System) */
+/* MockCloud — design tokens (from Nimbus Design System) */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 :root {
@@ -169,8 +169,8 @@ pre {
 .app {
   display: grid;
   grid-template-columns: 240px 1fr;
-  grid-template-rows: 48px 1fr auto;
-  grid-template-areas: "topbar topbar" "sidebar main" "trail trail";
+  grid-template-rows: 48px 1fr;
+  grid-template-areas: "topbar topbar" "sidebar main";
   height: 100vh;
   overflow: hidden;
 }
@@ -272,11 +272,6 @@ pre {
   transition: all var(--dur) var(--ease);
 }
 
-.pill:hover {
-  color: var(--fg);
-  border-color: var(--border-strong);
-}
-
 .pill .dot {
   width: 6px;
   height: 6px;
@@ -286,10 +281,6 @@ pre {
 
 .pill.env .dot {
   background: var(--info);
-}
-
-.pill .chev {
-  opacity: 0.6;
 }
 
 .icon-btn {
@@ -568,16 +559,6 @@ pre {
   filter: brightness(1.05);
 }
 
-.btn-danger-outline {
-  background: transparent;
-  color: var(--err);
-  border-color: var(--err-soft);
-}
-
-.btn-danger-outline:hover:not(:disabled) {
-  background: var(--err-soft);
-}
-
 .btn-sm {
   height: 26px;
   padding: 0 9px;
@@ -729,6 +710,23 @@ pre {
   background: var(--accent-soft);
 }
 
+/* Per-method coloring for the CloudTrail events table */
+.t-method.GET {
+  color: oklch(60% 0.14 240);
+}
+
+.t-method.POST {
+  color: oklch(62% 0.17 140);
+}
+
+.t-method.PUT {
+  color: oklch(60% 0.15 70);
+}
+
+.t-method.DELETE {
+  color: oklch(60% 0.2 20);
+}
+
 .mono {
   font-family: var(--font-mono);
   font-size: 12.5px;
@@ -831,16 +829,6 @@ pre {
   background: var(--err);
 }
 
-.status-info {
-  background: var(--info-soft);
-  color: oklch(45% 0.13 240);
-  border-color: oklch(65% 0.13 240 / 0.25);
-}
-
-.status-info .dot {
-  background: var(--info);
-}
-
 [data-theme="dark"] .status-ok {
   color: oklch(80% 0.16 150);
 }
@@ -853,21 +841,7 @@ pre {
   color: oklch(78% 0.18 20);
 }
 
-[data-theme="dark"] .status-info {
-  color: oklch(78% 0.13 240);
-}
-
-/* Toolbar / filters */
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--bg-elev);
-  flex-wrap: wrap;
-}
-
+/* Filters */
 .input {
   height: 30px;
   padding: 0 10px;
@@ -1165,137 +1139,6 @@ pre {
   font-size: 10.5px;
 }
 
-/* Trail */
-.trail {
-  grid-area: trail;
-  background: var(--bg-elev);
-  border-top: 1px solid var(--border);
-  z-index: 15;
-  transition: height var(--dur) var(--ease);
-}
-
-.trail-header {
-  display: flex;
-  align-items: center;
-  padding: 0 16px;
-  height: 36px;
-  gap: 12px;
-  border-bottom: 1px solid var(--border-subtle);
-  font-size: 12px;
-}
-
-.trail-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-weight: 500;
-  color: var(--fg);
-  font-family: var(--font-mono);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 11px;
-}
-
-.trail-title .dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--ok);
-  box-shadow: 0 0 0 3px var(--ok-soft);
-  animation: pulse 2s ease-in-out infinite;
-}
-
-.trail-count {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--fg-muted);
-  background: var(--bg-muted);
-  padding: 1px 6px;
-  border-radius: 4px;
-}
-
-.trail-actions {
-  margin-left: auto;
-  display: flex;
-  gap: 4px;
-}
-
-.trail-body {
-  max-height: 220px;
-  overflow-y: auto;
-  padding: 4px 0;
-  background: var(--bg-code);
-}
-
-.trail-empty {
-  padding: 20px;
-  text-align: center;
-  color: var(--fg-subtle);
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-
-.trail-line {
-  display: grid;
-  grid-template-columns: 90px 70px 1fr auto;
-  align-items: center;
-  gap: 12px;
-  padding: 4px 16px;
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--fg-muted);
-  border-bottom: 1px solid var(--border-subtle);
-  animation: slideIn 0.25s var(--ease);
-}
-
-.trail-line:last-child {
-  border-bottom: 0;
-}
-
-.trail-line .t-time {
-  color: var(--fg-subtle);
-}
-
-.trail-line .t-method {
-  font-weight: 600;
-}
-
-.trail-line .t-method.POST {
-  color: oklch(62% 0.17 140);
-}
-
-.trail-line .t-method.GET {
-  color: oklch(60% 0.14 240);
-}
-
-.trail-line .t-method.DELETE {
-  color: oklch(60% 0.2 20);
-}
-
-.trail-line .t-method.PUT {
-  color: oklch(60% 0.15 70);
-}
-
-.trail-line .t-path {
-  color: var(--fg);
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.trail-line .t-status {
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: var(--ok-soft);
-  color: oklch(50% 0.15 150);
-  font-size: 10.5px;
-  font-weight: 600;
-}
-
-.trail-line .t-status.err {
-  background: var(--err-soft);
-  color: oklch(50% 0.2 20);
-}
-
 /* CmdK */
 .cmdk {
   width: min(560px, 92vw);
@@ -1427,16 +1270,6 @@ pre {
   display: flex;
   align-items: center;
   gap: var(--gap);
-}
-
-.vstack {
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap);
-}
-
-.spacer {
-  flex: 1;
 }
 
 .divider {
@@ -1610,18 +1443,6 @@ pre {
   from {
     opacity: 0;
     transform: translateY(8px) scale(0.98);
-  }
-
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@keyframes slideIn {
-  from {
-    opacity: 0;
-    transform: translateX(-4px);
   }
 
   to {

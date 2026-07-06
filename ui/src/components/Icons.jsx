@@ -44,6 +44,5 @@ export const IconFolder   = I(e('path', { d: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0
 export const IconFile     = I(e('g', null, e('path',{d:'M6 3h8l4 4v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z'}), e('path',{d:'M14 3v4h4'})));
 export const IconUpload   = I(e('g', null, e('path',{d:'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'}), e('path',{d:'M17 8 12 3 7 8'}), e('path',{d:'M12 3v13'})));
 export const IconDownload = I(e('g', null, e('path',{d:'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'}), e('path',{d:'M7 10l5 5 5-5'}), e('path',{d:'M12 15V3'})));
-export const IconFilter   = I(e('path', { d: 'M3 5h18l-7 9v6l-4-2v-4z' }));
 export const IconSparkles = I(e('g', null, e('path',{d:'M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2 2M16 16l2 2M18 6l-2 2M8 16l-2 2'})));
 export const IconTerminal = I(e('g', null, e('path',{d:'m5 9 4 3-4 3'}), e('path',{d:'M11 15h8'}), e('rect',{x:2,y:4,width:20,height:16,rx:2})));

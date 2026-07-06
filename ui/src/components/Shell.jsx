@@ -27,16 +27,15 @@ export function Topbar({ theme, setTheme, openCmd, version, pushToast }) {
       </div>
 
       <div className="topbar-right">
-        <button className="pill env" title="Environment">
+        {/* Static labels — the app is single-environment/single-region, so no picker exists */}
+        <span className="pill env" title="Environment">
           <span className="dot" />
           dev-local
-          <Icons.IconChevDown size={12} className="chev" />
-        </button>
-        <button className="pill" title="Region">
+        </span>
+        <span className="pill" title="Region">
           <span className="dot" />
           us-east-1
-          <Icons.IconChevDown size={12} className="chev" />
-        </button>
+        </span>
         <button className="icon-btn" title={theme === 'dark' ? 'Switch to light' : 'Switch to dark'} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
           {theme === 'dark' ? <Icons.IconSun size={15} /> : <Icons.IconMoon size={15} />}
         </button>
@@ -79,14 +78,13 @@ function SettingsModal({ onClose, pushToast }) {
         <div>
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Reset all resources</div>
           <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 12, lineHeight: 1.5 }}>
-            Permanently delete every resource across all services (EC2, S3, Lambda, DynamoDB, IAM, etc.),
-            clear the activity trail, and terminate any Docker containers spawned by MockCloud.
+            Permanently delete every resource across all services (EC2, S3, Lambda, DynamoDB, IAM, etc.)
+            and clear the activity trail.
             This cannot be undone.
           </div>
           {!confirming ? (
             <button
-              className="btn"
-              style={{ background: 'var(--danger, #dc2626)', color: '#fff', borderColor: 'transparent' }}
+              className="btn btn-danger"
               onClick={() => setConfirming(true)}
             >
               Reset all resources…
@@ -95,8 +93,7 @@ function SettingsModal({ onClose, pushToast }) {
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <span style={{ fontSize: 12, fontWeight: 600 }}>Are you sure?</span>
               <button
-                className="btn"
-                style={{ background: 'var(--danger, #dc2626)', color: '#fff', borderColor: 'transparent' }}
+                className="btn btn-danger"
                 onClick={doReset}
                 disabled={busy}
               >

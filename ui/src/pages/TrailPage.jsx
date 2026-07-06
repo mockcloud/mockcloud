@@ -1,14 +1,8 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Button, Card, Empty, Stat, Status, Breadcrumb, Spinner, MiniChart, RowMenu, Modal, SimpleCreateModal, formatBytes, relTime } from '../components/UI.jsx';
+import React, { useState, useMemo } from 'react';
+import { Button, Card, Empty, Stat, Status, Breadcrumb, relTime } from '../components/UI.jsx';
 import * as Icons from '../components/Icons.jsx';
-import { TerminalView } from '../components/Terminal.jsx';
-import { api } from '../api.js';
 
-function stateKind(s) {
-  return { running:'ok', pending:'pending', stopped:'stopped', terminated:'err' }[s] || 'stopped';
-}
-
-export function TrailPage({ events }) {
+export function TrailPage({ events, onClear }) {
   const [q, setQ] = useState('');
   const [method, setMethod] = useState('all');
   const [status, setStatus] = useState('all');
@@ -29,14 +23,23 @@ export function TrailPage({ events }) {
 
   return (
     <>
-      <Breadcrumb items={['Console Home','Localtrail']}/>
+      <Breadcrumb items={['Console Home','CloudTrail']}/>
       <div className="page">
         <div className="page-header">
           <div className="page-title-row"><div className="service-icon"><Icons.IconTrail size={20}/></div>
-            <div><h1 className="page-title">Localtrail</h1><p className="page-subtitle">Every API call to the local daemon, searchable and exportable.</p></div>
+            <div><h1 className="page-title">CloudTrail</h1><p className="page-subtitle">Every API call to the local daemon, searchable and exportable.</p></div>
           </div>
           <div className="page-actions">
-            <Button icon={Icons.IconDownload}>Export as JSON</Button>
+            <Button icon={Icons.IconX} onClick={onClear} disabled={events.length===0}>Clear</Button>
+            <Button icon={Icons.IconDownload} disabled={filtered.length===0} onClick={()=>{
+              // Client-side export of the currently filtered events — no server round-trip
+              const blob = new Blob([JSON.stringify(filtered, null, 2)], { type:'application/json' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url; a.download = 'mockcloud-trail.json';
+              document.body.appendChild(a); a.click(); a.remove();
+              URL.revokeObjectURL(url);
+            }}>Export as JSON</Button>
           </div>
         </div>
         <div className="stats-row">
@@ -101,5 +104,3 @@ export function TrailPage({ events }) {
     </>
   );
 }
-
-// ─── Terminal ────────────────────────────────────────────────────────────────

@@ -13,14 +13,6 @@ export function Button({ variant = 'secondary', size, icon: Icon, children, ...r
   );
 }
 
-export function IconButton({ icon: Icon, size = 14, ariaLabel, ...rest }) {
-  return (
-    <button className="btn btn-secondary btn-icon btn-sm" aria-label={ariaLabel} {...rest}>
-      <Icon size={size} />
-    </button>
-  );
-}
-
 export function Status({ kind = 'ok', children }) {
   return (
     <span className={`status status-${kind}`}>
@@ -207,17 +199,18 @@ export function CmdK({ open, onClose, onNavigate }) {
   }, [open]);
 
   const items = useMemo(() => [
-    { id:'home',     label:'Home',               icon: Icons.IconHome,    sub:'g h' },
-    { id:'ec2',      label:'EC2 — Instances',     icon: Icons.IconEC2,     sub:'g e' },
-    { id:'s3',       label:'S3 — Buckets',        icon: Icons.IconS3,      sub:'g s' },
-    { id:'lambda',   label:'Lambda — Functions',  icon: Icons.IconLambda,  sub:'g l' },
-    { id:'dynamodb', label:'DynamoDB — Tables',   icon: Icons.IconDB,      sub:'g d' },
+    { id:'home',     label:'Home',               icon: Icons.IconHome,    sub:'h' },
+    { id:'ec2',      label:'EC2 — Instances',     icon: Icons.IconEC2,     sub:'e' },
+    { id:'s3',       label:'S3 — Buckets',        icon: Icons.IconS3,      sub:'s' },
+    { id:'lambda',   label:'Lambda — Functions',  icon: Icons.IconLambda,  sub:'l' },
+    { id:'dynamodb', label:'DynamoDB — Tables',   icon: Icons.IconDB,      sub:'d' },
     { id:'sns',      label:'SNS — Topics',        icon: Icons.IconSNS },
     { id:'sqs',      label:'SQS — Queues',        icon: Icons.IconSQS },
+    { id:'eventbridge', label:'EventBridge — Rules & buses', icon: Icons.IconSparkles },
     { id:'iam',      label:'IAM — Users & roles', icon: Icons.IconIAM },
     { id:'secrets',  label:'Secrets Manager',     icon: Icons.IconSecrets },
-    { id:'watch',    label:'Localwatch — Metrics',   icon: Icons.IconWatch },
-    { id:'trail',    label:'Localtrail — Audit log', icon: Icons.IconTrail },
+    { id:'watch',    label:'CloudWatch — Metrics',   icon: Icons.IconWatch },
+    { id:'trail',    label:'CloudTrail — Audit log', icon: Icons.IconTrail },
     { id:'terminal', label:'Terminal — CLI Shell',   icon: Icons.IconTerminal },
     { id:'billing',  label:'Billing & Cost',         icon: Icons.IconBilling },
   ].filter(x => !q || x.label.toLowerCase().includes(q.toLowerCase())), [q]);
@@ -274,41 +267,6 @@ export function Toasts({ toasts }) {
           </div>
         </div>
       ))}
-    </div>
-  );
-}
-
-export function CloudTrail({ events, onClear }) {
-  const [open, setOpen] = useState(true);
-  const bodyRef = useRef(null);
-  useEffect(() => { if (bodyRef.current) bodyRef.current.scrollTop = 0; }, [events]);
-  return (
-    <div className="trail">
-      <div className="trail-header">
-        <div className="trail-title"><span className="dot" />LOCALTRAIL — LIVE REQUEST LOG</div>
-        <span className="trail-count">{events.length}</span>
-        <div className="trail-actions">
-          <button className="btn btn-ghost btn-sm" onClick={onClear}>Clear</button>
-          <button className="btn btn-ghost btn-icon btn-sm" onClick={() => setOpen(v => !v)} aria-label="Toggle">
-            <Icons.IconChevDown size={14} style={{ transform: open ? 'none' : 'rotate(180deg)', transition:'transform 160ms' }} />
-          </button>
-        </div>
-      </div>
-      {open && (
-        <div className="trail-body" ref={bodyRef}>
-          {events.length === 0
-            ? <div className="trail-empty">// No requests yet — actions will stream here</div>
-            : events.map((e, i) => (
-              <div className="trail-line" key={i}>
-                <span className="t-time">{new Date(e.t).toISOString().substr(11, 12)}</span>
-                <span className={`t-method ${e.method}`}>{e.method}</span>
-                <span className="t-path">{e.path}</span>
-                <span className={`t-status ${e.status >= 400 ? 'err' : ''}`}>{e.status}</span>
-              </div>
-            ))
-          }
-        </div>
-      )}
     </div>
   );
 }

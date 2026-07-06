@@ -1,27 +1,20 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Button, Card, Empty, Stat, Status, Breadcrumb, Spinner, MiniChart, RowMenu, Modal, SimpleCreateModal, formatBytes, relTime } from '../components/UI.jsx';
+import React, { useState, useEffect } from 'react';
+import { Button, Breadcrumb, Spinner } from '../components/UI.jsx';
 import * as Icons from '../components/Icons.jsx';
 import { TerminalView } from '../components/Terminal.jsx';
 import { api } from '../api.js';
 
-function stateKind(s) {
-  return { running:'ok', pending:'pending', stopped:'stopped', terminated:'err' }[s] || 'stopped';
-}
-
-export function TerminalPage({ target, pushToast, onBack }) {
+export function TerminalPage({ onBack }) {
   const [sessionId, setSessionId] = useState(null);
   const [error, setError]         = useState(null);
   const [loading, setLoading]     = useState(true);
-
-  const isCli = target?.type === 'cli';
-  const inst  = target?.instance;
 
   useEffect(() => {
     let cancelled = false;
     let createdId = null;
     setLoading(true); setError(null); setSessionId(null);
 
-    api.terminal.create(target?.type || 'cli', inst?.id)
+    api.terminal.create()
       .then(d => {
         if (cancelled) {
           // StrictMode double-invoke: cleanup already ran, discard this session
@@ -38,40 +31,21 @@ export function TerminalPage({ target, pushToast, onBack }) {
       cancelled = true;
       if (createdId) { api.terminal.close(createdId).catch(() => {}); createdId = null; }
     };
-  }, [target?.type, inst?.id]);
-
-  const title    = isCli ? 'Local Cloud CLI' : `${inst?.name || inst?.id} — shell`;
-  const subtitle = isCli ? 'us-east-1 · localhost:4566' : `${inst?.type} · ${inst?.os}`;
-
-  const breadcrumb = isCli
-    ? ['Console Home', 'Terminal', 'CLI Shell']
-    : ['Console Home', { label:'EC2', onClick: onBack }, inst?.name || inst?.id || '—', 'Connect'];
+  }, []);
 
   return (
     <>
-      <Breadcrumb items={breadcrumb} />
+      <Breadcrumb items={['Console Home', 'Terminal', 'CLI Shell']} />
       <div className="page" style={{ display:'flex', flexDirection:'column', height:'calc(100vh - 104px)' }}>
         <div className="page-header" style={{ flexShrink:0 }}>
           <div className="page-title-row">
             <div className="service-icon"><Icons.IconTerminal size={20} /></div>
             <div>
-              <h1 className="page-title">{isCli ? 'Terminal' : 'Instance Shell'}</h1>
-              <p className="page-subtitle">
-                {isCli
-                  ? 'Shell pre-configured with AWS_ENDPOINT_URL=http://localhost:4566'
-                  : `Connected to ${inst?.name || inst?.id} (${inst?.os}) via docker exec`}
-              </p>
+              <h1 className="page-title">Terminal</h1>
+              <p className="page-subtitle">Shell pre-configured with AWS_ENDPOINT_URL=http://localhost:4566</p>
             </div>
           </div>
           <div className="page-actions">
-            {!isCli && inst && (
-              <div style={{ display:'flex', gap:8, alignItems:'center', fontSize:12, color:'var(--fg-muted)' }}>
-                <Status kind={inst.containerId ? 'ok' : 'warn'}>
-                  {inst.containerId ? 'Docker' : 'Simulated'}
-                </Status>
-                <span className="mono">{inst.privateIp}</span>
-              </div>
-            )}
             <Button onClick={onBack}>Back</Button>
           </div>
         </div>
@@ -91,12 +65,10 @@ export function TerminalPage({ target, pushToast, onBack }) {
             </div>
           )}
           {!loading && !error && sessionId && (
-            <TerminalView sessionId={sessionId} title={title} subtitle={subtitle} onClose={onBack} />
+            <TerminalView sessionId={sessionId} title="MockCloud CLI" subtitle="us-east-1 · localhost:4566" onClose={onBack} />
           )}
         </div>
       </div>
     </>
   );
 }
-
-// ─── Billing ─────────────────────────────────────────────────────────────────

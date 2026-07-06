@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Button, Card, Empty, Stat, Breadcrumb, Spinner, relTime } from '../components/UI.jsx';
+import { Button, Card, Empty, Stat, Breadcrumb, relTime } from '../components/UI.jsx';
 import * as Icons from '../components/Icons.jsx';
 import { api } from '../api.js';
 
