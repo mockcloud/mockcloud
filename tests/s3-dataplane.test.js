@@ -66,6 +66,25 @@ describe('S3 data-plane', () => {
     assert.ok(!list.Contents || list.Contents.length === 0);
   });
 
+  it('stores and returns uploaded bytes verbatim (no content-encoding mangling)', async () => {
+    // Purpose: catches any server implementation that mishandles request
+    // framing (aws-chunked, checksum trailers) by storing framed bytes — the
+    // ETag can lie if both sides hash the same mangled bytes, byte-equality
+    // cannot. >8KB nonuniform payload so it isn't trivially compressible and
+    // spans multiple stream chunks.
+    const b = freshBucket();
+    await s3.send(new CreateBucketCommand({ Bucket: b }));
+    const uploaded = Buffer.alloc(32 * 1024);
+    for (let i = 0; i < uploaded.length; i++) uploaded[i] = (i * 31 + 7) % 256;
+    await s3.send(new PutObjectCommand({ Bucket: b, Key: 'verbatim.bin', Body: uploaded }));
+    const got = await s3.send(new GetObjectCommand({ Bucket: b, Key: 'verbatim.bin' }));
+    assert.equal(got.ContentLength, uploaded.length);
+    const chunks = []; for await (const x of got.Body) chunks.push(x);
+    const downloaded = Buffer.concat(chunks);
+    assert.equal(downloaded.length, uploaded.length);
+    assert.equal(Buffer.compare(downloaded, uploaded), 0);
+  });
+
   it('virtual-hosted-style addressing resolves the bucket from Host', async () => {
     const b = freshBucket();
     await s3.send(new CreateBucketCommand({ Bucket: b }));

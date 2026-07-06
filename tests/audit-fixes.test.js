@@ -16,8 +16,10 @@
 //   7. SES query-protocol actions answer XML, not JSON.
 //   8. Step Functions DeleteStateMachine purges its executions from the global
 //      map (they used to be orphaned there forever).
-//   9. putLogEvent caps streams-per-group at MOCKCLOUD_MAX_LOG_STREAMS (200),
-//      evicting the oldest, never the stream just written.
+//   9. Log-stream cap (MOCKCLOUD_MAX_LOG_STREAMS eviction) — MOVED to
+//      tests/logs-stream-cap.test.js: the cap is read from the environment at
+//      server startup, so the suite needs its own per-file server with the
+//      flag lowered at module top.
 //
 // NOTE (audit item "EC2 unknown action"): the dispatcher's EC2_ACTIONS set and
 // the ec2.js switch are in full parity (28/28 actions), so the handler's
@@ -25,24 +27,18 @@
 // — an action outside the set falls through to the S3 handler instead. No test
 // is written for it; it would only be reachable by calling the handler with a
 // synthetic request, which tests nothing the dispatcher can produce.
+//
+// NOTE (stray enumerable _visTimer on export): RETIRED — see the export/import
+// describe below.
 import { describe, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
-import path from 'node:path';
 import {
   CreateLogGroupCommand, CreateLogStreamCommand, PutLogEventsCommand, GetLogEventsCommand,
 } from '@aws-sdk/client-cloudwatch-logs';
-import { CreateTableCommand } from '@aws-sdk/client-dynamodb';
+import { CreateTableCommand, ListTablesCommand } from '@aws-sdk/client-dynamodb';
 import { startServer } from './helpers/server.js';
-import { TEST_DDB_ROOT } from './helpers/test-env.js';
 import { makeClients } from './helpers/aws.js';
 import { awsForm, awsJson, xmlValue, xmlValues } from './helpers/http.js';
-// server.js (above) imports test-env.js first, so these src modules were
-// evaluated with the test storage roots already in place — same instances the
-// server uses.
-import { store } from '../src/store.js';
-import { persistNow, hydrateFromDisk } from '../src/services/dynamodb/persistence.js';
-import { putLogEvent } from '../src/services/cloudwatchlogs.js';
 
 let server, logs, dynamo;
 beforeAll(async () => { server = await startServer(); ({ logs, dynamo } = makeClients(server.endpoint)); });
@@ -185,25 +181,31 @@ describe('STS GetSessionToken validates DurationSeconds', () => {
 });
 
 describe('DELETE /mockcloud/reset wipes the DynamoDB snapshot (no resurrection)', () => {
-  it('a persisted table does not come back from hydrateFromDisk(true) after an HTTP reset', async () => {
+  it('a persisted table does not come back on rehydrate after an HTTP reset', async () => {
     await dynamo.send(new CreateTableCommand({
       TableName: 'audit-reset-tbl',
       BillingMode: 'PAY_PER_REQUEST',
       AttributeDefinitions: [{ AttributeName: 'id', AttributeType: 'S' }],
       KeySchema: [{ AttributeName: 'id', KeyType: 'HASH' }],
     }));
-    persistNow();                                       // force the debounced write
-    const snapshot = path.join(TEST_DDB_ROOT, 'tables.json');
-    assert.ok(existsSync(snapshot), 'snapshot exists on disk before the reset');
+    // Force the debounced snapshot write, then confirm it landed on disk.
+    const persist = await fetch(server.endpoint + '/mockcloud/_test/dynamodb/persist', { method: 'POST' });
+    assert.equal(persist.status, 200);
+    const before = await fetch(server.endpoint + '/mockcloud/_test/dynamodb/snapshot');
+    assert.equal((await before.json()).exists, true, 'snapshot exists on disk before the reset');
 
     const r = await fetch(server.endpoint + '/mockcloud/reset', { method: 'DELETE' });
     assert.equal(r.status, 200);
 
-    assert.ok(!existsSync(snapshot), 'reset removed the on-disk snapshot');
-    assert.deepEqual(store.dynamodb.tables, {}, 'in-memory tables cleared');
+    const after = await fetch(server.endpoint + '/mockcloud/_test/dynamodb/snapshot');
+    assert.equal((await after.json()).exists, false, 'reset removed the on-disk snapshot');
+    const list = await dynamo.send(new ListTablesCommand({}));
+    assert.deepEqual(list.TableNames, [], 'in-memory tables cleared');
 
-    hydrateFromDisk(true);                              // simulate a server restart
-    assert.deepEqual(store.dynamodb.tables, {}, 'nothing resurrects from disk');
+    // Simulate a server restart: drop the namespace, force-rehydrate from disk.
+    const reload = await fetch(server.endpoint + '/mockcloud/_test/dynamodb/reload', { method: 'POST' });
+    assert.equal(reload.status, 200);
+    assert.deepEqual((await reload.json()).tables, [], 'nothing resurrects from disk');
   });
 });
 
@@ -308,32 +310,10 @@ describe('snapshot export → import round-trip (/mockcloud/export, /mockcloud/i
     assert.equal(send.status, 200, 'FIFO send works after import');
   });
 
-  it('export drops a stray enumerable _visTimer instead of crashing (defense in depth)', async () => {
-    const create = await awsForm(server.endpoint, 'CreateQueue', { QueueName: 'stray-q' });
-    const qurl = xmlValue(create.body, 'QueueUrl');
-    await awsForm(server.endpoint, 'SendMessage', { QueueUrl: qurl, MessageBody: 'stray' });
-
-    // setInvisible() keeps _visTimer non-enumerable, but that guard lives at a
-    // single creation site. Simulate a future code path that plain-assigns the
-    // timer: the stringify replacer in store.export() is the last line of
-    // defense against the Timeout's circular _idlePrev/_idleNext links.
-    const m = store.sqs.queues[qurl].messages[0];
-    const timer = setTimeout(() => {}, 60_000);
-    try {
-      m._visTimer = timer;
-      // Premise check: the message was never received/delayed, so setInvisible
-      // never pre-defined the non-enumerable descriptor — the plain assignment
-      // above must be enumerable or this test silently stops testing anything.
-      assert.equal(Object.getOwnPropertyDescriptor(m, '_visTimer').enumerable, true,
-        'stray assignment is enumerable');
-      const snapText = store.export();
-      const snap = JSON.parse(snapText);
-      assert.ok(!snapText.includes('_visTimer'), 'timer key dropped from the snapshot');
-      assert.equal(snap.sqs.queues[qurl].messages[0].body, 'stray', 'message itself survives');
-    } finally {
-      clearTimeout(timer);
-    }
-  });
+  // RETIRED: 'export drops a stray enumerable _visTimer' — it planted a live
+  // Timeout handle on a message via direct store mutation, a Node-runtime-
+  // specific hazard (circular Timeout links) meaningless cross-implementation;
+  // the in-flight-message test above covers the black-box behavior.
 
 });
 
@@ -444,19 +424,5 @@ describe('Step Functions: DeleteStateMachine purges its executions', () => {
     const after = await sfn('DescribeExecution', { executionArn });
     assert.equal(after.status, 400);
     assert.match(after.body.__type, /ExecutionDoesNotExist/, 'execution purged with its machine');
-  });
-});
-
-describe('CloudWatch log-stream cap (MOCKCLOUD_MAX_LOG_STREAMS, default 200)', () => {
-  it('putLogEvent evicts the oldest streams past the cap and never the one just written', () => {
-    const group = '/aws/lambda/cap-fn';
-    const t0 = Date.now();
-    for (let i = 0; i < 205; i++) putLogEvent(group, `stream-${i}`, `msg-${i}`, t0 + i);
-
-    const streams = store.logs.groups[group].streams;
-    assert.equal(Object.keys(streams).length, 200, 'group holds exactly the cap');
-    assert.ok(streams['stream-204'], 'most recently written stream survived');
-    for (let i = 0; i < 5; i++) assert.ok(!streams[`stream-${i}`], `oldest stream-${i} evicted`);
-    assert.ok(streams['stream-5'], 'eviction stopped exactly at the cap boundary');
   });
 });

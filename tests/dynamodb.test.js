@@ -6,8 +6,6 @@ import { describe, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import assert from 'node:assert/strict';
 import { startServer } from './helpers/server.js';
 import { awsJson } from './helpers/http.js';
-import { store } from '../src/store.js';
-import { persistNow, hydrateFromDisk } from '../src/services/dynamodb/persistence.js';
 
 let server;
 const ddb = (op, payload) => awsJson(server.endpoint, `DynamoDB_20120810.${op}`, payload);
@@ -1145,13 +1143,21 @@ describe('Disk persistence (survives restart)', () => {
     await ddb('PutItem', { TableName: 'persist', Item: { id: { S: 'keep-me' }, v: { N: '1' } } });
 
     // Force the (debounced) snapshot to disk now.
-    persistNow();
+    const persist = await fetch(`${server.endpoint}/mockcloud/_test/dynamodb/persist`, { method: 'POST' });
+    assert.equal(persist.status, 200);
+    assert.equal((await persist.json()).persisted, true);
+    const snap = await fetch(`${server.endpoint}/mockcloud/_test/dynamodb/snapshot`);
+    assert.equal((await snap.json()).exists, true, 'snapshot written to disk');
 
-    // Simulate a restart: drop all in-memory state, then re-read from disk.
-    store.reset();
-    assert.equal(store.dynamodb.tables.persist, undefined);
-    hydrateFromDisk(true);
+    // Simulate a restart: the server drops its in-memory DynamoDB namespace,
+    // then force-rehydrates from the disk snapshot.
+    const reload = await fetch(`${server.endpoint}/mockcloud/_test/dynamodb/reload`, { method: 'POST' });
+    assert.equal(reload.status, 200);
+    const { tables } = await reload.json();
+    assert.ok(tables.includes('persist'), 'table restored from disk');
 
+    const list = await ddb('ListTables', {});
+    assert.ok(list.body.TableNames.includes('persist'));
     const get = await ddb('GetItem', { TableName: 'persist', Key: { id: { S: 'keep-me' } } });
     assert.equal(get.body.Item.id.S, 'keep-me');
     assert.equal(get.body.Item.v.N, '1');

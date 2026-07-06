@@ -13,6 +13,7 @@ import { registerEventBridgeRoutes } from './eventbridge.js';
 import { registerCloudWatchRoutes  } from './cloudwatch.js';
 import { registerBedrockRoutes     } from './bedrock.js';
 import { registerSESRoutes         } from './ses.js';
+import { registerTestRoutes        } from './_test.js';
 
 export function registerAllRoutes(app) {
   registerStatusRoutes(app);
@@ -29,4 +30,6 @@ export function registerAllRoutes(app) {
   registerCloudWatchRoutes(app);
   registerBedrockRoutes(app);
   registerSESRoutes(app);
+  // Test-only endpoints (see routes/_test.js) — never on in production.
+  if (process.env.MOCKCLOUD_TEST_ENDPOINTS === '1') registerTestRoutes(app);
 }

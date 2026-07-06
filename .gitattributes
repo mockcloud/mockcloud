@@ -1,0 +1,13 @@
+# Normalize line endings: LF in the repo for everything git sees as text.
+# The maintainer develops on Windows — without this, CRLF drifts into test
+# fixtures and breaks byte-sensitive conformance comparisons.
+* text=auto eol=lf
+
+# Go tooling expects LF unconditionally.
+*.go text eol=lf
+
+# Binary artifacts.
+*.png binary
+*.ico binary
+*.woff2 binary
+*.zip binary

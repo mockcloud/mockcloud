@@ -103,12 +103,17 @@ const uiServer = http.createServer((req, res) => {
 
 // ── Start ──────────────────────────────────────────────────────────────────
 awsServer.listen(PORT, HOST, () => {
+  // PORT=0 asks the OS for a free port — report the one actually bound.
+  const boundPort = awsServer.address().port;
   console.log(`\n  ╭─────────────────────────────────────────────────╮`);
   console.log(`  │   ☁  MockCloud  v${VERSION.padEnd(30)}│`);
-  console.log(`  │   AWS API  →  http://${HOST}:${PORT}             │`);
+  console.log(`  │   AWS API  →  http://${HOST}:${boundPort}             │`);
   if (UI_ENABLED) console.log(`  │   Console  →  http://${HOST}:${UI_PORT}             │`);
   console.log(`  │   github.com/mockcloud/mockcloud                │`);
   console.log(`  ╰─────────────────────────────────────────────────╯\n`);
+  // Machine-readable readiness line — the test harness (and any supervisor)
+  // waits for this to learn the ephemeral port. Keep the format stable.
+  console.log(`MOCKCLOUD_READY endpoint=http://${HOST === '0.0.0.0' ? '127.0.0.1' : HOST}:${boundPort}`);
 });
 
 if (UI_ENABLED) uiServer.listen(UI_PORT, HOST);
@@ -118,6 +123,15 @@ startBackground();
 
 process.on('SIGTERM', () => { stopBackground(); awsServer.close(); if (UI_ENABLED) uiServer.close(); process.exit(0); });
 process.on('SIGINT',  () => { stopBackground(); awsServer.close(); if (UI_ENABLED) uiServer.close(); process.exit(0); });
+
+// Orphan protection for supervised runs (the test harness spawns one server
+// per test file): when the parent's pipe closes, exit instead of lingering.
+// Opt-in — a terminal user Ctrl+D'ing stdin must not kill the daemon.
+if (process.env.MOCKCLOUD_EXIT_ON_STDIN_CLOSE === '1') {
+  process.stdin.resume();
+  process.stdin.on('end',   () => process.exit(0));
+  process.stdin.on('close', () => process.exit(0));
+}
 
 // Belt-and-braces: log async throws / unhandled rejections from request
 // handling but don't let them terminate the daemon. The router already wraps

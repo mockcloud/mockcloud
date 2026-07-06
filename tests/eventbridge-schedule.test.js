@@ -8,7 +8,6 @@ import { CreateQueueCommand, GetQueueAttributesCommand, ReceiveMessageCommand } 
 import { startServer } from './helpers/server.js';
 import { makeClients } from './helpers/aws.js';
 import { awsJson } from './helpers/http.js';
-import { fireDueSchedulesOnce } from '../src/services/eventbridge.js';
 
 let server, sqs;
 beforeAll(async () => { server = await startServer(); ({ sqs } = makeClients(server.endpoint)); });
@@ -16,6 +15,14 @@ afterAll(() => server.close());
 beforeEach(() => server.resetStore());
 
 const eb = (op, payload) => awsJson(server.endpoint, `AmazonEventBridge.${op}`, payload);
+async function fireSchedules(advanceMs) {
+  const res = await fetch(`${server.endpoint}/mockcloud/_test/eventbridge/fire-schedules`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ advanceMs }),
+  });
+  assert.equal(res.status, 200);
+}
 async function queueArn(QueueUrl) {
   const { Attributes } = await sqs.send(new GetQueueAttributesCommand({ QueueUrl, AttributeNames: ['QueueArn'] }));
   return Attributes.QueueArn;
@@ -36,7 +43,7 @@ describe('EventBridge scheduled rules', () => {
     await eb('PutRule', { Name: 'tick', ScheduleExpression: 'rate(1 minute)' });
     await eb('PutTargets', { Rule: 'tick', Targets: [{ Id: '1', Arn: await queueArn(QueueUrl) }] });
 
-    await fireDueSchedulesOnce(Date.now() + 61_000);  // jump past the 1-minute boundary
+    await fireSchedules(61_000);  // jump past the 1-minute boundary
 
     const recv = await sqs.send(new ReceiveMessageCommand({ QueueUrl, MaxNumberOfMessages: 10 }));
     assert.equal(recv.Messages?.length, 1);
@@ -49,7 +56,7 @@ describe('EventBridge scheduled rules', () => {
     const { QueueUrl } = await sqs.send(new CreateQueueCommand({ QueueName: 'sched-off' }));
     await eb('PutRule', { Name: 'off', ScheduleExpression: 'rate(1 minute)', State: 'DISABLED' });
     await eb('PutTargets', { Rule: 'off', Targets: [{ Id: '1', Arn: await queueArn(QueueUrl) }] });
-    await fireDueSchedulesOnce(Date.now() + 61_000);
+    await fireSchedules(61_000);
     const recv = await sqs.send(new ReceiveMessageCommand({ QueueUrl }));
     assert.ok(!recv.Messages || recv.Messages.length === 0);
   });

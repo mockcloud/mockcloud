@@ -1,8 +1,10 @@
 // tests/iam-policy.test.js
-// Opt-in IAM policy evaluation (MOCKCLOUD_IAM=strict). Flips the flag for this
-// (forked) process so other suites stay unenforced. Covers implicit deny,
-// allow, Deny-beats-Allow, a condition key, a resource policy, and that `soft`
-// mode never blocks. Identity policies are scripted via the exempt control
+// Opt-in IAM policy evaluation (MOCKCLOUD_IAM=strict). Sets the flag at module
+// top so this (forked) process — and a spawned server, which inherits env —
+// enforces while other suites stay unenforced. Covers implicit deny, allow,
+// Deny-beats-Allow, a condition key, and a resource policy. (`soft` mode lives
+// in iam-policy-soft.test.js — the flag can't be flipped mid-test against a
+// spawned server.) Identity policies are scripted via the exempt control
 // plane; the principal is the SDK's access key id (`test`).
 import { describe, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import assert from 'node:assert/strict';
@@ -10,8 +12,7 @@ import assert from 'node:assert/strict';
 process.env.MOCKCLOUD_IAM = 'strict';   // MUST be set before startServer
 
 const { startServer } = await import('./helpers/server.js');
-const { store } = await import('../src/store.js');
-const { SQSClient, CreateQueueCommand, DeleteQueueCommand, SendMessageCommand, ReceiveMessageCommand } =
+const { SQSClient, CreateQueueCommand, DeleteQueueCommand, SendMessageCommand, ReceiveMessageCommand, SetQueueAttributesCommand } =
   await import('@aws-sdk/client-sqs');
 
 let server, sqs;
@@ -72,28 +73,22 @@ describe('IAM policy evaluation (strict)', () => {
   });
 
   it('grants access via a resource policy with no identity policy', async () => {
-    const url = 'http://localhost:4566/000000000000/rp-queue';
     const arn = 'arn:aws:sqs:us-east-1:000000000000:rp-queue';
-    store.sqs.queues[url] = {
-      name: 'rp-queue', url, arn, type: 'standard', messages: [], created: Date.now(),
-      attributes: { Policy: JSON.stringify({ Version: '2012-10-17', Statement: [{ Effect: 'Allow', Principal: '*', Action: 'sqs:SendMessage', Resource: arn }] }) },
-    };
+    const queuePolicy = { Version: '2012-10-17', Statement: [{ Effect: 'Allow', Principal: '*', Action: 'sqs:SendMessage', Resource: arn }] };
+
+    // Bootstrap: temporarily allow sqs:* so the queue and its resource policy
+    // can be set up via the SDK while strict enforcement is on, then revoke.
+    await setPolicy('test', allow('sqs:*'));
+    const { QueueUrl } = await sqs.send(new CreateQueueCommand({ QueueName: 'rp-queue' }));
+    await sqs.send(new SetQueueAttributesCommand({ QueueUrl, Attributes: { Policy: JSON.stringify(queuePolicy) } }));
+    await fetch(server.endpoint + '/mockcloud/iam/identity-policies?principal=test', { method: 'DELETE' });
+
     // No identity policy for `test`. SendMessage is allowed only by the queue policy.
-    const out = await sqs.send(new SendMessageCommand({ QueueUrl: url, MessageBody: 'hi' }));
+    const out = await sqs.send(new SendMessageCommand({ QueueUrl, MessageBody: 'hi' }));
     assert.ok(out.MessageId, 'resource policy should grant SendMessage');
     // ReceiveMessage isn't in the resource policy → denied.
-    const e = await err(sqs.send(new ReceiveMessageCommand({ QueueUrl: url })));
+    const e = await err(sqs.send(new ReceiveMessageCommand({ QueueUrl })));
     assert.ok(e);
     assert.match(e.name, /AccessDenied/);
-  });
-
-  it('soft mode logs but never blocks', async () => {
-    process.env.MOCKCLOUD_IAM = 'soft';
-    try {
-      const out = await sqs.send(new CreateQueueCommand({ QueueName: 'soft-ok' }));   // no policy, but soft
-      assert.ok(out.QueueUrl, 'soft mode should allow despite no policy');
-    } finally {
-      process.env.MOCKCLOUD_IAM = 'strict';
-    }
   });
 });

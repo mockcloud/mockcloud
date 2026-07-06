@@ -18,3 +18,8 @@ process.env.MOCKCLOUD_DYNAMODB_ROOT = TEST_DDB_ROOT;
 
 // Fast background-poll cadence so eventing tests don't wait a full second.
 process.env.MOCKCLOUD_POLL_INTERVAL_MS ??= '50';
+
+// Enable the /mockcloud/_test/* control-plane endpoints (routes/_test.js).
+// In spawn mode (MOCKCLOUD_SERVER_CMD) the spawned server inherits this env —
+// same contract, different process.
+process.env.MOCKCLOUD_TEST_ENDPOINTS ??= '1';

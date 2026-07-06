@@ -14,13 +14,17 @@ import { CreateFunctionCommand, InvokeCommand } from '@aws-sdk/client-lambda';
 import { startServer } from './helpers/server.js';
 import { makeClients } from './helpers/aws.js';
 import { lambdaJson, awsForm } from './helpers/http.js';
-import { invokeLambda } from '../src/services/lambda.js';
+
+// MUST be set before startServer: in spawn mode (MOCKCLOUD_SERVER_CMD) the
+// server child inherits process.env at spawn time, so the env-var-isolation
+// test below can only observe this secret if it exists before boot.
+process.env.MOCKCLOUD_HOST_SECRET = 'do-not-leak';
 
 let server, lambda;
 const allowedOrigin = 'http://localhost:4567';   // default UI_PORT — in the allowlist
 
 beforeAll(async () => { server = await startServer(); ({ lambda } = makeClients(server.endpoint)); });
-afterAll(() => server.close());
+afterAll(() => { server.close(); delete process.env.MOCKCLOUD_HOST_SECRET; });
 beforeEach(() => server.resetStore());
 
 const createFn = (name, code) => lambda.send(new CreateFunctionCommand({
@@ -108,7 +112,10 @@ describe('Content-Type-gated body parsing', () => {
   });
 });
 
-// ── Finding #5 — Strict terminal gate (origin) + feature flag (wip) ─────────
+// ── Finding #5 — Strict terminal gate (origin) + feature flag ───────────────
+// This file only covers the DISABLED default (MOCKCLOUD_ENABLE_TERMINAL is
+// never set here). The enabled-flag behavior lives in security-terminal.test.js
+// because the flag must be set before the server boots to reach a spawned server.
 describe('Terminal endpoint is gated', () => {
   it('rejects without an Origin header (origin gate)', async () => {
     const res = await fetch(`${server.endpoint}/mockcloud/terminal/sessions`, {
@@ -122,19 +129,6 @@ describe('Terminal endpoint is gated', () => {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'Origin': allowedOrigin }, body: JSON.stringify({ type: 'cli' }),
     });
     assert.equal(res.status, 403);   // MOCKCLOUD_ENABLE_TERMINAL unset → denied
-  });
-
-  it('allows an allowlisted Origin once explicitly enabled over loopback', async () => {
-    const prev = process.env.MOCKCLOUD_ENABLE_TERMINAL;
-    process.env.MOCKCLOUD_ENABLE_TERMINAL = 'true';
-    try {
-      const res = await fetch(`${server.endpoint}/mockcloud/terminal/sessions`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'Origin': allowedOrigin }, body: JSON.stringify({ type: 'cli' }),
-      });
-      assert.equal(res.status, 201);
-    } finally {
-      if (prev === undefined) delete process.env.MOCKCLOUD_ENABLE_TERMINAL; else process.env.MOCKCLOUD_ENABLE_TERMINAL = prev;
-    }
   });
 });
 
@@ -243,31 +237,36 @@ describe('Lambda env-var isolation', () => {
   });
 
   it('does not leak the host environment into user code', async () => {
-    process.env.MOCKCLOUD_HOST_SECRET = 'do-not-leak';
-    try {
-      await createFn('env-iso',
-        'exports.handler = async () => ({ leaked: process.env.MOCKCLOUD_HOST_SECRET ?? null, fn: process.env.AWS_LAMBDA_FUNCTION_NAME });');
-      const out = await lambda.send(new InvokeCommand({ FunctionName: 'env-iso' }));
-      const r = JSON.parse(Buffer.from(out.Payload).toString());
-      assert.equal(r.leaked, null);     // host secret is NOT visible to user code
-      assert.equal(r.fn, 'env-iso');    // standard Lambda vars ARE present
-    } finally {
-      delete process.env.MOCKCLOUD_HOST_SECRET;
-    }
+    // MOCKCLOUD_HOST_SECRET is planted at module top (before startServer) so
+    // it is present in the server's environment in every harness mode.
+    await createFn('env-iso',
+      'exports.handler = async () => ({ leaked: process.env.MOCKCLOUD_HOST_SECRET ?? null, fn: process.env.AWS_LAMBDA_FUNCTION_NAME });');
+    const out = await lambda.send(new InvokeCommand({ FunctionName: 'env-iso' }));
+    const r = JSON.parse(Buffer.from(out.Payload).toString());
+    assert.equal(r.leaked, null);     // host secret is NOT visible to user code
+    assert.equal(r.fn, 'env-iso');    // standard Lambda vars ARE present
   });
 });
 
 // ── Re-entrancy guard (internal invoke storm cap) ───────────────────────────
+// Drives the server's INTERNAL invokeLambda path over the test control plane
+// (POST /mockcloud/_test/lambda/internal-invoke), which returns invokeLambda's
+// { result, duration, error, requestId } verbatim.
 describe('Re-entrancy guard', () => {
+  const internalInvoke = (source) => lambdaJson(
+    server.endpoint, 'POST', '/mockcloud/_test/lambda/internal-invoke',
+    { functionName: 'does-not-exist', payload: {}, source });
+
   it('caps runaway internal invocations but never direct API invokes', async () => {
     let guardHit = false;
-    for (let i = 0; i < 250; i++) {
-      const r = await invokeLambda('does-not-exist', {}, { source: 's3' });
-      if (/re-entrancy guard/i.test(r.error || '')) { guardHit = true; break; }
+    for (let i = 0; i < 300; i++) {
+      const r = await internalInvoke('s3');
+      assert.equal(r.status, 200);
+      if (/re-entrancy guard/i.test(r.body.error || '')) { guardHit = true; break; }
     }
     assert.ok(guardHit, 'expected the re-entrancy guard to trip for internal invokes');
-    const direct = await invokeLambda('does-not-exist', {}, { source: 'aws-api' });
-    assert.match(direct.error, /Function not found/);
+    const direct = await internalInvoke('aws-api');
+    assert.match(direct.body.error, /Function not found/);
   });
 });
 
