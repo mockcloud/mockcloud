@@ -3,5 +3,8 @@
   "control-plane.test.js",
   "error-boundary.test.js",
   "logs-stream-cap.test.js",
-  "logs.test.js"
+  "logs.test.js",
+  "s3-dataplane.test.js",
+  "s3-multipart.test.js",
+  "s3.test.js"
 ]

@@ -19,6 +19,7 @@ import (
 	"github.com/mockcloud/mockcloud/internal/httpapi"
 	"github.com/mockcloud/mockcloud/internal/protocol/respond"
 	"github.com/mockcloud/mockcloud/internal/services/lambda"
+	"github.com/mockcloud/mockcloud/internal/services/s3"
 	"github.com/mockcloud/mockcloud/internal/state"
 	"github.com/mockcloud/mockcloud/internal/store"
 )
@@ -28,7 +29,9 @@ func main() {
 	st := store.New()
 	cors := httpapi.NewCORS(cfg)
 	lambdaSvc := lambda.New(st, cfg)
-	disp := dispatch.New(st, cfg, lambdaSvc)
+	s3Svc := s3.New(st, cfg)
+	s3Svc.HydrateFromDisk() // pre-existing buckets/objects survive restarts
+	disp := dispatch.New(st, cfg, lambdaSvc, s3Svc)
 
 	router := &controlplane.Router{}
 	deps := controlplane.Deps{Store: st, Cfg: cfg, Lambda: lambdaSvc}
@@ -145,9 +148,7 @@ func cloudWatchCollector(st *store.Store) func() {
 			for _, b := range s.S3.Buckets {
 				for _, o := range b.Objects {
 					objects++
-					if size, ok := o["size"].(float64); ok {
-						bytes += size
-					}
+					bytes += float64(o.Size)
 				}
 			}
 			messages := 0.0

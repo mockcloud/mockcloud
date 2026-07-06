@@ -65,13 +65,11 @@ func RegisterStatusRoutes(rt *Router, d Deps) {
 			for _, f := range st.Lambda.Functions {
 				lambdaInvocations += f.Invocations
 			}
-			s3Objects, s3Bytes := 0, 0.0
+			s3Objects, s3Bytes := 0, int64(0)
 			for _, b := range st.S3.Buckets {
 				for _, o := range b.Objects {
 					s3Objects++
-					if size, ok := o["size"].(float64); ok {
-						s3Bytes += size
-					}
+					s3Bytes += o.Size
 				}
 			}
 			ebRules := 0

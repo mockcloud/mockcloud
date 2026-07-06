@@ -17,6 +17,7 @@ import (
 	"github.com/mockcloud/mockcloud/internal/services/logs"
 	"github.com/mockcloud/mockcloud/internal/services/s3"
 	"github.com/mockcloud/mockcloud/internal/services/sqs"
+	"github.com/mockcloud/mockcloud/internal/state"
 	"github.com/mockcloud/mockcloud/internal/store"
 )
 
@@ -43,10 +44,21 @@ type Dispatcher struct {
 	logsSvc   *logs.Service
 }
 
-func New(st *store.Store, cfg *config.Config, lambdaSvc *lambda.Service) *Dispatcher {
+func New(st *store.Store, cfg *config.Config, lambdaSvc *lambda.Service, s3Svc *s3.Service) *Dispatcher {
+	// S3 notification delivery (fire-and-forget, outside the store lock).
+	// Lambda targets work now; SQS lands in M5, SNS in M6.
+	s3Svc.Deliver = func(nc state.NotifConfig, event map[string]any) {
+		switch nc.Type {
+		case "lambda":
+			parts := strings.Split(nc.Arn, ":")
+			lambdaSvc.Invoke(parts[len(parts)-1], string(respond.Marshal(event)), "s3", "")
+		case "sqs": // M5
+		case "sns": // M6
+		}
+	}
 	return &Dispatcher{
 		st: st, cfg: cfg,
-		s3Svc:     s3.New(st, cfg),
+		s3Svc:     s3Svc,
 		lambdaSvc: lambdaSvc,
 		logsSvc:   logs.New(st, cfg),
 	}

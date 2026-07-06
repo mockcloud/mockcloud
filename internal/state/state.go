@@ -44,22 +44,73 @@ type S3State struct {
 }
 
 type Bucket struct {
-	Name              string                    `json:"name"`
-	Region            string                    `json:"region"`
-	Created           int64                     `json:"created"`
-	Objects           map[string]map[string]any `json:"objects"`
-	ObjectVersions    map[string]any            `json:"objectVersions"`
-	MultipartUploads  map[string]any            `json:"multipartUploads"`
-	Website           any                       `json:"website"` // null until configured
-	ACL               string                    `json:"acl"`
-	PublicAccessBlock PublicAccessBlock         `json:"publicAccessBlock"`
-	Versioning        string                    `json:"versioning"`
-	// Set lazily by later milestones (PutBucketCors etc.) — omitted until then,
-	// matching Node objects that gain the key on first write.
-	CorsRules    []map[string]any `json:"corsRules,omitempty"`
-	Policy       any              `json:"policy,omitempty"`
-	Tagging      any              `json:"tagging,omitempty"`
-	Notification any              `json:"notification,omitempty"`
+	Name             string                   `json:"name"`
+	Region           string                   `json:"region"`
+	Created          int64                    `json:"created"`
+	Objects          map[string]*ObjectMeta   `json:"objects"`
+	ObjectVersions   map[string][]*ObjectMeta `json:"objectVersions"`
+	MultipartUploads map[string]*MPU          `json:"multipartUploads"`
+	Website          *WebsiteConfig           `json:"website"` // null until configured
+	ACL              string                   `json:"acl"`
+	PublicAccessBlock *PublicAccessBlock      `json:"publicAccessBlock"` // null after DELETE
+	Versioning       string                   `json:"versioning"`
+	// Fields Node objects gain on first write — omitted until then.
+	Policy              *string           `json:"policy,omitempty"`
+	Cors                *string           `json:"cors,omitempty"` // verbatim XML for GET round-trips
+	CorsRules           []CorsRule        `json:"corsRules,omitempty"`
+	Tags                map[string]string `json:"tags,omitempty"`
+	NotificationXml     string            `json:"notificationXml,omitempty"` // verbatim XML
+	NotificationConfigs []NotifConfig     `json:"notificationConfigs,omitempty"`
+}
+
+// ObjectMeta is both the current-head entry (bucket.objects) and a version
+// history entry (bucket.objectVersions). Delete markers carry only
+// key/isDeleteMarker/versionId/modified.
+type ObjectMeta struct {
+	Key            string            `json:"key"`
+	Size           int64             `json:"size"`
+	ContentType    string            `json:"contentType,omitempty"`
+	ETag           string            `json:"etag,omitempty"`
+	Modified       int64             `json:"modified"`
+	Metadata       map[string]string `json:"metadata,omitempty"`
+	VersionID      *string           `json:"versionId"`
+	IsDeleteMarker bool              `json:"isDeleteMarker"`
+}
+
+type MPU struct {
+	UploadID    string            `json:"uploadId"`
+	Key         string            `json:"key"`
+	ContentType string            `json:"contentType"`
+	Metadata    map[string]string `json:"metadata"`
+	Initiated   int64             `json:"initiated"`
+	Parts       map[int]*MPUPart  `json:"parts"`
+}
+
+type MPUPart struct {
+	PartNumber int    `json:"partNumber"`
+	ETag       string `json:"etag"`
+	Size       int64  `json:"size"`
+}
+
+type WebsiteConfig struct {
+	IndexDocument string `json:"indexDocument"`
+	ErrorDocument string `json:"errorDocument"`
+}
+
+type CorsRule struct {
+	AllowedOrigins []string `json:"allowedOrigins"`
+	AllowedMethods []string `json:"allowedMethods"`
+	AllowedHeaders []string `json:"allowedHeaders"`
+	ExposeHeaders  []string `json:"exposeHeaders"`
+	MaxAgeSeconds  *int     `json:"maxAgeSeconds"`
+}
+
+type NotifConfig struct {
+	Type   string   `json:"type"` // sqs | sns | lambda
+	Arn    string   `json:"arn"`
+	Events []string `json:"events"`
+	Prefix *string  `json:"prefix"`
+	Suffix *string  `json:"suffix"`
 }
 
 type PublicAccessBlock struct {
