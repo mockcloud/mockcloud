@@ -1,7 +1,8 @@
 // Package eventbridge — port of src/services/eventbridge.js.
 //
-// M1 scope: rule/bus CRUD over the JSON protocol. PutEvents delivery,
-// pattern matching and schedule firing land in M7.
+// Rule/bus CRUD over the JSON protocol (M1) plus event delivery: PutEvents
+// with the deliberately-shallow pattern matcher, target fan-out and
+// rate()/cron() schedule firing (M7, delivery.go).
 package eventbridge
 
 import (
@@ -15,7 +16,26 @@ import (
 	"github.com/mockcloud/mockcloud/internal/store"
 )
 
-func Handler(w http.ResponseWriter, r *httpapi.Request, st *store.Store) {
+// Service carries the store plus the cross-service delivery seams
+// (deliverToTargets in Node lazy-imported lambda/sqs/sns/stepfunctions; here
+// dispatch.New wires closures instead). Every seam is called OUTSIDE the
+// store lock — Fanout and Invoke re-acquire it.
+type Service struct {
+	st *store.Store
+	// InvokeLambda fires an EventBridge envelope at a function
+	// (fire-and-forget, source 'eventbridge').
+	InvokeLambda func(fnName, eventJSON string)
+	// FanoutSNS delivers a published message to a topic's subscribers
+	// (fire-and-forget).
+	FanoutSNS func(topicArn, msgID, message, subject string)
+	// StartSFN starts a state-machine execution with the envelope as input.
+	StartSFN func(stateMachineArn, inputJSON string)
+}
+
+func New(st *store.Store) *Service { return &Service{st: st} }
+
+func (svc *Service) Handler(w http.ResponseWriter, r *httpapi.Request) {
+	st := svc.st
 	target := r.Header.Get("x-amz-target")
 	// SDK v2 uses 'AWSEvents.X', v3 uses 'AmazonEventBridge.X'.
 	normalized := strings.Replace(target, "AWSEvents.", "AmazonEventBridge.", 1)
@@ -262,8 +282,7 @@ func Handler(w http.ResponseWriter, r *httpapi.Request, st *store.Store) {
 		respond.JSON(w, 200, map[string]any{"Tags": []any{}})
 
 	case "PutEvents":
-		// Event delivery (pattern matching + target fan-out) lands in M7.
-		respond.ErrorJSON(w, 400, "NotImplemented", "MockCloud Go port: PutEvents not yet ported (M7)")
+		svc.putEvents(w, b)
 
 	default:
 		respond.ErrorJSON(w, 400, "InvalidAction", "Unknown EventBridge action: "+target)

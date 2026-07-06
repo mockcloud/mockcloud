@@ -17,8 +17,10 @@ import (
 	"github.com/mockcloud/mockcloud/internal/services/lambda"
 	"github.com/mockcloud/mockcloud/internal/services/logs"
 	"github.com/mockcloud/mockcloud/internal/services/s3"
+	"github.com/mockcloud/mockcloud/internal/services/ses"
 	"github.com/mockcloud/mockcloud/internal/services/sns"
 	"github.com/mockcloud/mockcloud/internal/services/sqs"
+	"github.com/mockcloud/mockcloud/internal/services/stepfunctions"
 	"github.com/mockcloud/mockcloud/internal/state"
 	"github.com/mockcloud/mockcloud/internal/store"
 )
@@ -46,10 +48,14 @@ type Dispatcher struct {
 	logsSvc   *logs.Service
 	ddbSvc    *dynamodb.Service
 	snsSvc    *sns.Service
+	ebSvc     *eventbridge.Service
+	sfnSvc    *stepfunctions.Service
+	sesSvc    *ses.Service
 }
 
-func New(st *store.Store, cfg *config.Config, lambdaSvc *lambda.Service, s3Svc *s3.Service, ddbSvc *dynamodb.Service) *Dispatcher {
+func New(st *store.Store, cfg *config.Config, lambdaSvc *lambda.Service, s3Svc *s3.Service, ddbSvc *dynamodb.Service, ebSvc *eventbridge.Service, sesSvc *ses.Service) *Dispatcher {
 	snsSvc := sns.New(st, lambdaSvc)
+	sfnSvc := stepfunctions.New(st)
 
 	// S3 notification delivery (fire-and-forget, outside the store lock) —
 	// port of deliverNotification (src/services/s3.js).
@@ -86,6 +92,30 @@ func New(st *store.Store, cfg *config.Config, lambdaSvc *lambda.Service, s3Svc *
 		lambdaSvc.Invoke(fnName, string(respond.Marshal(event)), "dynamodb-stream", "")
 	}
 
+	// EventBridge target delivery (deliverToTargets) — Node lazy-imported the
+	// sibling services; here the seams are closures, all invoked with the
+	// store lock released. Lambda invokes and SNS fan-outs are fire-and-forget
+	// (Node's `.catch(() => {})`); Step Functions starts are synchronous.
+	ebSvc.InvokeLambda = func(fnName, eventJSON string) {
+		go lambdaSvc.Invoke(fnName, eventJSON, "eventbridge", "")
+	}
+	ebSvc.FanoutSNS = func(topicArn, msgID, message, subject string) {
+		go snsSvc.Fanout(topicArn, msgID, message, subject, nil)
+	}
+	ebSvc.StartSFN = func(stateMachineArn, inputJSON string) {
+		sfnSvc.StartStateMachineExecution(stateMachineArn, inputJSON, "")
+	}
+
+	// SES receipt-rule actions: the SNS fan-out was awaited in Node (runs
+	// synchronously before the inbound route responds); the Lambda invoke was
+	// fire-and-forget.
+	sesSvc.FanoutSNS = func(topicArn, msgID, message, subject string) {
+		snsSvc.Fanout(topicArn, msgID, message, subject, nil)
+	}
+	sesSvc.InvokeLambda = func(fnName, eventJSON string) {
+		go lambdaSvc.Invoke(fnName, eventJSON, "ses", "")
+	}
+
 	return &Dispatcher{
 		st: st, cfg: cfg,
 		s3Svc:     s3Svc,
@@ -93,6 +123,9 @@ func New(st *store.Store, cfg *config.Config, lambdaSvc *lambda.Service, s3Svc *
 		logsSvc:   logs.New(st, cfg),
 		ddbSvc:    ddbSvc,
 		snsSvc:    snsSvc,
+		ebSvc:     ebSvc,
+		sfnSvc:    sfnSvc,
+		sesSvc:    sesSvc,
 	}
 }
 
@@ -120,9 +153,9 @@ func (d *Dispatcher) Dispatch(w http.ResponseWriter, r *httpapi.Request) {
 
 	switch {
 	case strings.HasPrefix(target, "AmazonEventBridge.") || strings.HasPrefix(target, "AWSEvents."):
-		eventbridge.Handler(w, r, d.st)
+		d.ebSvc.Handler(w, r)
 	case strings.HasPrefix(target, "AWSStepFunctions."):
-		notPorted(w, r, "Step Functions", "M7")
+		d.sfnSvc.Handler(w, r)
 	case strings.HasPrefix(target, "Logs_20140328."):
 		d.logsSvc.Handler(w, r)
 	case strings.HasPrefix(target, "DynamoDBStreams_"):
@@ -136,7 +169,7 @@ func (d *Dispatcher) Dispatch(w http.ResponseWriter, r *httpapi.Request) {
 	case strings.HasPrefix(target, "AmazonSimpleNotificationService") || has(snsActions, action):
 		d.snsSvc.Handler(w, r)
 	case strings.HasPrefix(target, "AmazonSimpleEmailService") || has(sesActions, action):
-		notPorted(w, r, "SES", "M7")
+		d.sesSvc.Handler(w, r)
 	case strings.HasPrefix(target, "secretsmanager.") || strings.Contains(target, "SecretsManager"):
 		notPorted(w, r, "Secrets Manager", "M8")
 	case has(iamActions, action):

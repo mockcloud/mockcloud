@@ -4,6 +4,7 @@
   "dynamodb-sdk.test.js",
   "dynamodb.test.js",
   "error-boundary.test.js",
+  "eventbridge-schedule.test.js",
   "lambda-depth.test.js",
   "lambda-esm.test.js",
   "lambda.test.js",
@@ -13,10 +14,12 @@
   "s3-multipart.test.js",
   "s3-notifications.test.js",
   "s3.test.js",
+  "ses.test.js",
   "sns-depth.test.js",
   "sns.test.js",
   "sqs-dlq.test.js",
   "sqs-fifo.test.js",
   "sqs-messaging.test.js",
-  "sqs.test.js"
+  "sqs.test.js",
+  "stepfunctions.test.js"
 ]

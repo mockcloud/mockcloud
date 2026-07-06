@@ -19,8 +19,10 @@ import (
 	"github.com/mockcloud/mockcloud/internal/httpapi"
 	"github.com/mockcloud/mockcloud/internal/protocol/respond"
 	"github.com/mockcloud/mockcloud/internal/services/dynamodb"
+	"github.com/mockcloud/mockcloud/internal/services/eventbridge"
 	"github.com/mockcloud/mockcloud/internal/services/lambda"
 	"github.com/mockcloud/mockcloud/internal/services/s3"
+	"github.com/mockcloud/mockcloud/internal/services/ses"
 	"github.com/mockcloud/mockcloud/internal/state"
 	"github.com/mockcloud/mockcloud/internal/store"
 )
@@ -34,7 +36,9 @@ func main() {
 	s3Svc.HydrateFromDisk() // pre-existing buckets/objects survive restarts
 	ddbSvc := dynamodb.New(st, cfg)
 	ddbSvc.HydrateFromDisk(false) // tables snapshot survives restarts too
-	disp := dispatch.New(st, cfg, lambdaSvc, s3Svc, ddbSvc)
+	ebSvc := eventbridge.New(st)
+	sesSvc := ses.New(st, cfg)
+	disp := dispatch.New(st, cfg, lambdaSvc, s3Svc, ddbSvc, ebSvc, sesSvc)
 
 	router := &controlplane.Router{}
 	deps := controlplane.Deps{Store: st, Cfg: cfg, Lambda: lambdaSvc, DDB: ddbSvc}
@@ -45,8 +49,11 @@ func main() {
 	lambdaSvc.RegisterUIRoutes(func(method, pattern string, h func(http.ResponseWriter, *httpapi.Request)) {
 		router.Add(method, pattern, h)
 	})
+	sesSvc.RegisterUIRoutes(func(method, pattern string, h func(http.ResponseWriter, *httpapi.Request)) {
+		router.Add(method, pattern, h)
+	})
 	if cfg.TestEndpoints {
-		controlplane.RegisterTestRoutes(router, deps)
+		controlplane.RegisterTestRoutes(router, deps, ebSvc)
 	}
 
 	// ── AWS API listener ────────────────────────────────────────────────
@@ -109,10 +116,11 @@ func main() {
 	}
 	fmt.Printf("MOCKCLOUD_READY endpoint=http://%s:%d\n", readyHost, boundPort)
 
-	// ── Background ticks (EventBridge schedules land M7) ─────────────────
+	// ── Background ticks ──────────────────────────────────────────────────
 	ticker := background.New(cfg.PollIntervalMs)
 	ticker.Register(cloudWatchCollector(st))
 	ticker.Register(lambdaSvc.PollEventSourceMappingsOnce) // SQS→Lambda ESM
+	ticker.Register(func() { ebSvc.FireDueSchedulesOnce(state.NowMs()) })
 	ticker.Start()
 
 	// ── Orphan protection: exit when the supervising pipe closes ─────────
