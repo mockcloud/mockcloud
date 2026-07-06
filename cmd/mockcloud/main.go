@@ -18,6 +18,7 @@ import (
 	"github.com/mockcloud/mockcloud/internal/dispatch"
 	"github.com/mockcloud/mockcloud/internal/httpapi"
 	"github.com/mockcloud/mockcloud/internal/protocol/respond"
+	"github.com/mockcloud/mockcloud/internal/services/dynamodb"
 	"github.com/mockcloud/mockcloud/internal/services/lambda"
 	"github.com/mockcloud/mockcloud/internal/services/s3"
 	"github.com/mockcloud/mockcloud/internal/state"
@@ -31,11 +32,16 @@ func main() {
 	lambdaSvc := lambda.New(st, cfg)
 	s3Svc := s3.New(st, cfg)
 	s3Svc.HydrateFromDisk() // pre-existing buckets/objects survive restarts
-	disp := dispatch.New(st, cfg, lambdaSvc, s3Svc)
+	ddbSvc := dynamodb.New(st, cfg)
+	ddbSvc.HydrateFromDisk(false) // tables snapshot survives restarts too
+	disp := dispatch.New(st, cfg, lambdaSvc, s3Svc, ddbSvc)
 
 	router := &controlplane.Router{}
-	deps := controlplane.Deps{Store: st, Cfg: cfg, Lambda: lambdaSvc}
+	deps := controlplane.Deps{Store: st, Cfg: cfg, Lambda: lambdaSvc, DDB: ddbSvc}
 	controlplane.RegisterStatusRoutes(router, deps)
+	ddbSvc.RegisterUIRoutes(func(method, pattern string, h func(http.ResponseWriter, *httpapi.Request)) {
+		router.Add(method, pattern, h)
+	})
 	if cfg.TestEndpoints {
 		controlplane.RegisterTestRoutes(router, deps)
 	}
@@ -122,6 +128,9 @@ func main() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	<-sig
+	// Flush a pending debounced DynamoDB snapshot so a Ctrl+C right after a
+	// write doesn't lose data (persistence.js SIGINT/SIGTERM flush).
+	ddbSvc.FlushPendingSnapshot()
 	ticker.Stop()
 	_ = awsServer.Close()
 	if uiServer != nil {

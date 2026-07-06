@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"time"
 
 	"github.com/mockcloud/mockcloud/internal/config"
 	"github.com/mockcloud/mockcloud/internal/httpapi"
 	"github.com/mockcloud/mockcloud/internal/protocol/respond"
+	"github.com/mockcloud/mockcloud/internal/services/dynamodb"
 	"github.com/mockcloud/mockcloud/internal/services/lambda"
 	"github.com/mockcloud/mockcloud/internal/state"
 	"github.com/mockcloud/mockcloud/internal/store"
@@ -35,11 +35,12 @@ func servicesMap() map[string]string {
 }
 
 // Deps is what route modules need — the store, disk-root config for reset's
-// wipe semantics, and the Lambda service (internal-invoke test hook).
+// wipe semantics, and the Lambda/DynamoDB services (test hooks + reset).
 type Deps struct {
 	Store  *store.Store
 	Cfg    *config.Config
 	Lambda *lambda.Service
+	DDB    *dynamodb.Service
 }
 
 func RegisterStatusRoutes(rt *Router, d Deps) {
@@ -138,11 +139,11 @@ func RegisterStatusRoutes(rt *Router, d Deps) {
 				body["s3DiskError"] = err.Error()
 			}
 		}
-		// Wipe the DynamoDB snapshot so reset tables don't resurrect either.
+		// Wipe the DynamoDB snapshot so reset tables don't resurrect either —
+		// wipeDisk also cancels any pending debounced write and resets the
+		// hydrate guard (src/services/dynamodb/persistence.js wipeDisk).
 		if service == "" || service == "dynamodb" {
-			if err := os.Remove(filepath.Join(d.Cfg.DDBRoot, "tables.json")); err != nil && !os.IsNotExist(err) {
-				body["dynamodbDiskError"] = err.Error()
-			}
+			d.DDB.WipeDisk()
 		}
 		respond.JSON(w, 200, body)
 	})

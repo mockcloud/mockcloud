@@ -12,6 +12,7 @@ import (
 	"github.com/mockcloud/mockcloud/internal/httpapi"
 	"github.com/mockcloud/mockcloud/internal/protocol/respond"
 	"github.com/mockcloud/mockcloud/internal/services/cloudwatch"
+	"github.com/mockcloud/mockcloud/internal/services/dynamodb"
 	"github.com/mockcloud/mockcloud/internal/services/eventbridge"
 	"github.com/mockcloud/mockcloud/internal/services/lambda"
 	"github.com/mockcloud/mockcloud/internal/services/logs"
@@ -42,9 +43,10 @@ type Dispatcher struct {
 	s3Svc     *s3.Service
 	lambdaSvc *lambda.Service
 	logsSvc   *logs.Service
+	ddbSvc    *dynamodb.Service
 }
 
-func New(st *store.Store, cfg *config.Config, lambdaSvc *lambda.Service, s3Svc *s3.Service) *Dispatcher {
+func New(st *store.Store, cfg *config.Config, lambdaSvc *lambda.Service, s3Svc *s3.Service, ddbSvc *dynamodb.Service) *Dispatcher {
 	// S3 notification delivery (fire-and-forget, outside the store lock).
 	// Lambda targets work now; SQS lands in M5, SNS in M6.
 	s3Svc.Deliver = func(nc state.NotifConfig, event map[string]any) {
@@ -61,6 +63,7 @@ func New(st *store.Store, cfg *config.Config, lambdaSvc *lambda.Service, s3Svc *
 		s3Svc:     s3Svc,
 		lambdaSvc: lambdaSvc,
 		logsSvc:   logs.New(st, cfg),
+		ddbSvc:    ddbSvc,
 	}
 }
 
@@ -94,9 +97,9 @@ func (d *Dispatcher) Dispatch(w http.ResponseWriter, r *httpapi.Request) {
 	case strings.HasPrefix(target, "Logs_20140328."):
 		d.logsSvc.Handler(w, r)
 	case strings.HasPrefix(target, "DynamoDBStreams_"):
-		notPorted(w, r, "DynamoDB Streams", "M4")
+		d.ddbSvc.StreamsHandler(w, r)
 	case strings.HasPrefix(target, "DynamoDB_"):
-		notPorted(w, r, "DynamoDB", "M4")
+		d.ddbSvc.Handler(w, r)
 	case strings.HasPrefix(target, "AWSLambda") ||
 		strings.HasPrefix(path, "/2015-03-31/functions") || strings.HasPrefix(path, "/2015-03-31/event-source-mappings") ||
 		strings.HasPrefix(path, "/2020-06-30/functions") || strings.HasPrefix(path, "/2020-06-30/event-source-mappings"):

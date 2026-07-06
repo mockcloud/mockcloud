@@ -1,6 +1,8 @@
 [
   "cloudwatch.test.js",
   "control-plane.test.js",
+  "dynamodb-sdk.test.js",
+  "dynamodb.test.js",
   "error-boundary.test.js",
   "logs-stream-cap.test.js",
   "logs.test.js",
