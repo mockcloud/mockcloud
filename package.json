@@ -4,6 +4,13 @@
   "description": "MockCloud — Free, open-source local AWS emulator. No account. No token. MIT licensed.",
   "main": "src/index.js",
   "type": "module",
+  "files": [
+    "src",
+    "scripts",
+    "ui/dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
@@ -11,7 +18,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "ui:dev": "cd ui && npm run dev",
-    "ui:build": "cd ui && npm run build"
+    "ui:build": "cd ui && npm run build",
+    "prepack": "cd ui && npm ci && npm run build"
   },
   "engines": {
     "node": ">=18.0.0"
