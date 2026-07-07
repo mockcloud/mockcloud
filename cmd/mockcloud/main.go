@@ -4,6 +4,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -31,6 +32,7 @@ import (
 	"github.com/mockcloud/mockcloud/internal/sigv4"
 	"github.com/mockcloud/mockcloud/internal/state"
 	"github.com/mockcloud/mockcloud/internal/store"
+	"github.com/mockcloud/mockcloud/ui"
 )
 
 func main() {
@@ -130,17 +132,17 @@ func main() {
 	awsServer := &http.Server{Handler: awsHandler}
 	go func() { _ = awsServer.Serve(ln) }()
 
-	// ── UI static server (embed lands in M10; serve ui/dist when present) ──
+	// ── UI static server ─────────────────────────────────────────────────
+	// Source the console from, in order: the binary itself (release builds,
+	// -tags embedui), MOCKCLOUD_UI_DIR (dev override), or ./ui/dist on disk.
 	var uiServer *http.Server
 	if cfg.UIOn {
-		if dist, err := filepath.Abs("ui/dist"); err == nil {
-			if _, err := os.Stat(dist); err == nil {
-				uiServer = &http.Server{
-					Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.UIPort),
-					Handler: uiHandler(dist),
-				}
-				go func() { _ = uiServer.ListenAndServe() }()
+		if fsys := resolveUIFS(); fsys != nil {
+			uiServer = &http.Server{
+				Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.UIPort),
+				Handler: uiHandler(fsys),
 			}
+			go func() { _ = uiServer.ListenAndServe() }()
 		}
 	}
 
@@ -237,13 +239,44 @@ func cloudWatchCollector(st *store.Store) func() {
 	}
 }
 
-// uiHandler serves the prebuilt console with SPA fallback (src/index.js's
-// UI server). go:embed replaces this in M10.
-func uiHandler(dist string) http.Handler {
+// resolveUIFS returns the console filesystem, or nil when no UI is available:
+// the embedded dist (release builds, -tags embedui), else MOCKCLOUD_UI_DIR,
+// else ./ui/dist on disk.
+func resolveUIFS() fs.FS {
+	if embedded, ok := ui.DistFS(); ok {
+		return embedded
+	}
+	dir := os.Getenv("MOCKCLOUD_UI_DIR")
+	if dir == "" {
+		dir = "ui/dist"
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		if info, err := os.Stat(abs); err == nil && info.IsDir() {
+			return os.DirFS(abs)
+		}
+	}
+	return nil
+}
+
+// uiHandler serves the prebuilt console (fs.FS) with SPA fallback — the
+// io/fs port of src/index.js's UI server. fs.FS forbids path escapes, so it
+// replaces the old safeJoin containment check.
+func uiHandler(fsys fs.FS) http.Handler {
 	mimes := map[string]string{
 		".html": "text/html", ".js": "application/javascript", ".css": "text/css",
 		".svg": "image/svg+xml", ".ico": "image/x-icon", ".png": "image/png",
 		".json": "application/json", ".woff2": "font/woff2",
+	}
+	read := func(name string) ([]byte, string, bool) {
+		data, err := fs.ReadFile(fsys, name)
+		if err != nil {
+			return nil, "", false
+		}
+		ct := mimes[strings.ToLower(filepath.Ext(name))]
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		return data, ct, true
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -251,27 +284,22 @@ func uiHandler(dist string) http.Handler {
 			w.WriteHeader(204)
 			return
 		}
-		rel := strings.TrimPrefix(r.URL.Path, "/")
-		fp := filepath.Join(dist, filepath.FromSlash(rel))
-		// Containment: resolved path must stay inside dist (safeJoin).
-		if rel == "" || !strings.HasPrefix(fp, dist) {
-			fp = filepath.Join(dist, "index.html")
+		name := strings.TrimPrefix(r.URL.Path, "/")
+		if name == "" || !fs.ValidPath(name) {
+			name = "index.html"
 		}
-		if _, err := os.Stat(fp); err != nil {
-			fp = filepath.Join(dist, "index.html")
-		}
-		content, err := os.ReadFile(fp)
-		if err != nil {
-			w.WriteHeader(404)
-			_, _ = w.Write([]byte("Not found"))
-			return
-		}
-		ct := mimes[filepath.Ext(fp)]
-		if ct == "" {
-			ct = "application/octet-stream"
+		data, ct, ok := read(name)
+		if !ok {
+			// SPA fallback.
+			data, ct, ok = read("index.html")
+			if !ok {
+				w.WriteHeader(404)
+				_, _ = w.Write([]byte("Not found"))
+				return
+			}
 		}
 		w.Header().Set("Content-Type", ct)
 		w.WriteHeader(200)
-		_, _ = w.Write(content)
+		_, _ = w.Write(data)
 	})
 }

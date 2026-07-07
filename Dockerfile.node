@@ -1,0 +1,27 @@
+# MockCloud (Go) — Lambda-capable image.
+#
+# Same static binary as the slim Dockerfile, but on node:20-alpine so the
+# Lambda sandbox can spawn `node` to execute function code. Larger (~150 MB)
+# but fully featured. Tag suffix: <version>-node.
+
+FROM node:20-alpine AS ui-builder
+WORKDIR /app/ui
+COPY ui/package*.json ./
+RUN npm ci
+COPY ui/ ./
+RUN npm run build
+
+FROM golang:1.24-alpine AS go-builder
+WORKDIR /src
+COPY go.mod ./
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+COPY ui/*.go ./ui/
+COPY --from=ui-builder /app/ui/dist ./ui/dist
+RUN CGO_ENABLED=0 go build -tags embedui -ldflags="-s -w" -o /mockcloud ./cmd/mockcloud
+
+FROM node:20-alpine
+COPY --from=go-builder /mockcloud /usr/local/bin/mockcloud
+EXPOSE 4566 4567
+ENV PORT=4566 UI_PORT=4567 HOST=0.0.0.0
+ENTRYPOINT ["mockcloud"]

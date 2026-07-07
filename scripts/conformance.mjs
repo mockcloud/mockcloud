@@ -8,7 +8,9 @@
 //   node scripts/conformance.mjs --all           # progress report over every test file (never fails)
 //   node scripts/conformance.mjs --all --strict  # full suite, failures are fatal
 //   node scripts/conformance.mjs --files sqs.test.js s3.test.js
-//   node scripts/conformance.mjs --server "node src/index.js"   # test another implementation
+//   node scripts/conformance.mjs --server "<cmd>"   # arbitrate against another
+//     implementation, e.g. the retired Node reference in a node-legacy worktree
+//     (see docs/MIGRATION.md): --server "node ../mockcloud-node/src/index.js"
 //
 // The ratchet manifest (conformance/passing.json) lists test files that MUST
 // pass against the Go server. Porting PRs append their files; once green,

@@ -6,12 +6,11 @@ Run AWS services on your machine. Point your SDK at `localhost:4566` and go.
 
 ```bash
 npx mockcloud          # coming soon
-# or
+# or build from source (Go ≥1.22 + Node for the console & Lambda):
 git clone https://github.com/mockcloud/mockcloud
 cd mockcloud
-npm install
-npm --prefix ui install && npm run ui:build   # build the console UI
-npm start
+npm --prefix ui install && npm run build   # build console + embed it in the binary
+./bin/mockcloud
 ```
 
 ```
@@ -32,14 +31,16 @@ MockCloud is the unapologetically free alternative: **16 of the most-used AWS se
 the cross-service plumbing that actually fires, and a visual console — all under the MIT
 license. No account, no auth token, no usage limits, no telemetry, no "upgrade to unlock."
 
-It's a single Node.js process with **zero runtime dependencies** (the AWS SDKs are dev-only,
-for the test suite). Clone it, read it, hack on it.
+It's a single **Go binary** with the console embedded and **zero third-party
+dependencies** (the AWS SDKs are dev-only, for the test suite). One static file
+to drop on any machine. Clone it, read it, hack on it.
 
 - **No AWS account needed** — develop and test completely offline
-- **No Docker required** — pure Node.js, works out of the box
+- **Single static binary** — the console is embedded; no runtime to install (Node is optional, only for Lambda — see below)
 - **Visual console included** — browser UI to inspect every service
 - **Cross-service wiring is real** — S3 → SQS/SNS/Lambda, SNS → SQS/Lambda, SQS → Lambda, EventBridge → SQS/SNS/Lambda/Step Functions, DynamoDB Streams → Lambda, and SES inbound → S3/SNS/Lambda all actually fire
-- **SDK-tested** — the suite drives MockCloud with the real `@aws-sdk/*` clients (presigned URLs even exercise live SigV4)
+- **SDK-tested** — the same suite of real `@aws-sdk/*` clients that guided the Node→Go rewrite gates every commit (presigned URLs even exercise live SigV4); see [docs/MIGRATION.md](docs/MIGRATION.md)
+- **Lambda runs real Node.js** — the Go server shells out to `node` (on `PATH` or `MOCKCLOUD_NODE_BIN`) to execute function code
 
 ---
 

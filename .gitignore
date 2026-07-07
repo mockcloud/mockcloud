@@ -25,5 +25,9 @@ npm-debug.log*
 data/
 *.db
 
-# Go build output (scripts/conformance.mjs builds here)
-bin/
+# Go build output (scripts/conformance.mjs builds here) — but keep the npm
+# launcher shim (bin/mockcloud.js) tracked.
+/bin/mockcloud
+/bin/mockcloud.exe
+/bin/mockcloud-*
+/bin/@mockcloud

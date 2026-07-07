@@ -1,25 +1,23 @@
 {
   "name": "mockcloud",
-  "version": "1.2.1",
-  "description": "MockCloud — Free, open-source local AWS emulator. No account. No token. MIT licensed.",
-  "main": "src/index.js",
+  "version": "2.0.0",
+  "description": "MockCloud — Free, open-source local AWS emulator. No account. No token. MIT licensed. (Go implementation)",
   "type": "module",
+  "bin": {
+    "mockcloud": "bin/mockcloud.js"
+  },
   "files": [
-    "src",
-    "scripts",
-    "ui/dist",
+    "bin",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "node --watch src/index.js",
-    "reset": "node scripts/reset.js",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "start": "node bin/mockcloud.js",
+    "build": "npm run ui:build && go build -tags embedui -o bin/mockcloud ./cmd/mockcloud",
+    "test": "node scripts/conformance.mjs --all --strict",
+    "conformance": "node scripts/conformance.mjs",
     "ui:dev": "cd ui && npm run dev",
-    "ui:build": "cd ui && npm run build",
-    "prepack": "cd ui && npm ci && npm run build"
+    "ui:build": "cd ui && npm run build"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -45,8 +43,10 @@
     "cloud",
     "serverless",
     "testing",
-    "offline"
+    "offline",
+    "golang"
   ],
+  "comment:optionalDependencies": "At publish time (docs/MIGRATION.md §Release) the release pipeline adds @mockcloud/cli-<os>-<arch> platform packages here so `npx mockcloud` fetches the matching prebuilt binary (esbuild pattern). Omitted from the repo so `npm install` stays clean before those packages are published.",
   "devDependencies": {
     "@aws-sdk/client-cloudwatch": "^3.1045.0",
     "@aws-sdk/client-cloudwatch-logs": "^3.1045.0",

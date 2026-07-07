@@ -3,46 +3,10 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main, wip-snapshot]
+    branches: [main]
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node: [18, 20]
-    name: test (node ${{ matrix.node }})
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: ${{ matrix.node }}
-          cache: npm
-      - run: npm ci
-      - run: npm test
-
-  # Spawn-mode harness check: the same suite, driven purely over HTTP against
-  # an externally spawned server (one process per test file). This is the
-  # conformance path the Go port will be gated on — running it against the
-  # Node reference on every PR keeps the harness itself honest. Windows leg
-  # catches path/spawn drift where the maintainer develops.
-  conformance-node:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    name: conformance vs node (${{ matrix.os }})
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 20
-          cache: npm
-      - run: npm ci
-      - run: node scripts/conformance.mjs --all --strict --server "node src/index.js"
-
+  # Go unit tests + vet + default build (the stub UI path — no prebuilt dist).
   go-check:
     runs-on: ubuntu-latest
     steps:
@@ -55,8 +19,12 @@ jobs:
       - run: go build ./...
       - run: go test ./...
 
-  # The ratchet: every file in conformance/passing.json must pass against the
-  # Go server. Porting PRs append their files; once green, always green.
+  # Conformance: the vitest suite (real @aws-sdk/* clients) driven purely over
+  # HTTP against the spawned Go binary, one server process per test file. This
+  # is now the ONLY functional test path — the same suite that gated the Node
+  # reference before the M11 cutover (see docs/MIGRATION.md). Node is present
+  # both to run vitest and as the Lambda sandbox runtime. Windows leg catches
+  # path/spawn drift where the maintainer develops.
   conformance-go:
     strategy:
       fail-fast: false
@@ -77,3 +45,22 @@ jobs:
           cache: false
       - run: npm ci
       - run: node scripts/conformance.mjs --ci
+
+  # Guard the release build path: build the console, then compile the fully
+  # self-contained binary (-tags embedui). Nothing here is published — that is
+  # the manual release pipeline (docs/MIGRATION.md §Release).
+  embed-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: false
+      - run: npm --prefix ui ci
+      - run: npm run ui:build
+      - run: go build -tags embedui -o /tmp/mockcloud ./cmd/mockcloud

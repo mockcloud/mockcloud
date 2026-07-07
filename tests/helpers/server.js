@@ -1,34 +1,47 @@
 // tests/helpers/server.js
 // Starts a MockCloud server for a test file and returns
 //   { endpoint, port, resetStore(), close() }
-// in one of three modes:
+// in one of two modes (the suite is now the Go server's conformance harness —
+// the Node implementation was removed at the M11 cutover; see docs/MIGRATION.md):
 //
-//   in-process (default)          — boots the AWS handler on an ephemeral port
-//                                   inside this process. Fast; used by `npm test`.
-//   spawn      (MOCKCLOUD_SERVER_CMD) — spawns ONE SERVER PER TEST FILE as a child
-//                                   process and talks to it over HTTP only. This is
-//                                   the conformance mode: the command can be
-//                                   `node src/index.js` or a Go binary. The child
-//                                   inherits process.env, so per-file flags set at
-//                                   module top (MOCKCLOUD_VERIFY_SIGV4, MOCKCLOUD_IAM,
-//                                   …) and the pid-keyed test roots flow in for free.
-//   attach     (MOCKCLOUD_TEST_ENDPOINT) — debug only: use an already-running server.
-//                                   Single-file runs only; parallel files would
-//                                   reset each other's state.
+//   spawn  (default / MOCKCLOUD_SERVER_CMD) — spawns ONE SERVER PER TEST FILE as
+//          a child process and talks to it over HTTP only. `npm test` runs the
+//          conformance runner, which builds the Go binary and sets the command;
+//          a bare `vitest` run falls back to the locally-built ./bin/mockcloud.
+//          The child inherits process.env, so per-file flags set at module top
+//          (MOCKCLOUD_VERIFY_SIGV4, MOCKCLOUD_IAM, …) and the pid-keyed test
+//          roots flow in for free.
+//   attach (MOCKCLOUD_TEST_ENDPOINT) — debug only: use an already-running server.
+//          Single-file runs only; parallel files would reset each other's state.
 //
 // test-env MUST be first — it sets MOCKCLOUD_S3_ROOT / MOCKCLOUD_DYNAMODB_ROOT
-// (and MOCKCLOUD_TEST_ENDPOINTS) before any src module captures them at load time.
-import { TEST_S3_ROOT, TEST_DDB_ROOT } from './test-env.js';
-import http from 'http';
+// (and MOCKCLOUD_TEST_ENDPOINTS), which the spawned server inherits.
+import './test-env.js';
 import { spawn } from 'child_process';
-import { mkdirSync, rmSync } from 'fs';
+import { existsSync } from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 const READY_TIMEOUT_MS = 15_000;
+const HELPERS_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 export async function startServer() {
-  if (process.env.MOCKCLOUD_SERVER_CMD) return startSpawned(process.env.MOCKCLOUD_SERVER_CMD);
   if (process.env.MOCKCLOUD_TEST_ENDPOINT) return startAttached(process.env.MOCKCLOUD_TEST_ENDPOINT);
-  return startInProcess();
+  return startSpawned(process.env.MOCKCLOUD_SERVER_CMD || defaultServerCmd());
+}
+
+// Locate the locally-built Go binary for a bare `vitest` run (the conformance
+// runner sets MOCKCLOUD_SERVER_CMD explicitly and skips this).
+function defaultServerCmd() {
+  const exe = process.platform === 'win32' ? 'mockcloud.exe' : 'mockcloud';
+  const bin = path.resolve(HELPERS_DIR, '../../bin', exe);
+  if (!existsSync(bin)) {
+    throw new Error(
+      `MockCloud Go binary not found at ${bin}.\n` +
+      `Build it (go build -o bin/${exe} ./cmd/mockcloud) or run \`npm test\` (which builds it),\n` +
+      `or set MOCKCLOUD_SERVER_CMD / MOCKCLOUD_TEST_ENDPOINT.`);
+  }
+  return `"${bin}"`;
 }
 
 // ── spawn mode ─────────────────────────────────────────────────────────────
@@ -116,88 +129,4 @@ async function startAttached(endpoint) {
 async function httpReset(endpoint) {
   const r = await fetch(`${endpoint}/mockcloud/reset`, { method: 'DELETE' });
   if (r.status !== 200) throw new Error(`resetStore failed: HTTP ${r.status}`);
-}
-
-// ── in-process mode ────────────────────────────────────────────────────────
-// src modules are imported dynamically so spawn/attach runs stay black-box:
-// importing them here would evaluate the whole Node implementation inside the
-// test process and create a second, unrelated store instance.
-
-async function startInProcess() {
-  const [
-    { store },
-    { wipeDisk },
-    { Router },
-    { dispatchAWS },
-    { registerAllRoutes },
-    { sendInternalError },
-    { applyCors, attachBody },
-    { sigv4Enabled, verifySigV4, sendSigV4Error },
-    { iamMode, enforceIam, sendIamError },
-    { startBackground, stopBackground },
-  ] = await Promise.all([
-    import('../../src/store.js'),
-    import('../../src/services/dynamodb/persistence.js'),
-    import('../../src/router.js'),
-    import('../../src/dispatcher.js'),
-    import('../../src/routes/index.js'),
-    import('../../src/middleware/response.js'),
-    import('../../src/middleware/http.js'),
-    import('../../src/middleware/sigv4.js'),
-    import('../../src/iam/policy-eval.js'),
-    import('../../src/lifecycle.js'),
-  ]);
-
-  // Isolated storage roots (set in test-env.js) — create them up front.
-  mkdirSync(TEST_S3_ROOT, { recursive: true });
-  mkdirSync(TEST_DDB_ROOT, { recursive: true });
-
-  const apiRouter = new Router();
-  registerAllRoutes(apiRouter);
-
-  const server = http.createServer(async (req, res) => {
-    // Shared CORS + cross-origin gate + body parsing (same path as production).
-    if (!applyCors(req, res)) return;
-    await attachBody(req);
-
-    try {
-      const matched = await apiRouter.dispatch(req, res);
-      if (!matched) {
-        if (sigv4Enabled()) {
-          const authErr = verifySigV4(req);
-          if (authErr) return sendSigV4Error(req, res, authErr);
-        }
-        if (iamMode() !== 'off') {
-          const iamErr = enforceIam(req);
-          if (iamErr) return sendIamError(req, res, iamErr);
-        }
-        await dispatchAWS(req, res);
-      }
-    } catch (err) {
-      sendInternalError(req, res, err);
-    }
-  });
-
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  startBackground();
-  const port = server.address().port;
-  const endpoint = `http://127.0.0.1:${port}`;
-
-  return {
-    endpoint,
-    port,
-    resetStore() {
-      store.reset();
-      // wipeDisk targets the TEST_DDB_ROOT snapshot (test-env sets the env var
-      // before persistence.js captures it) and ALSO clears the pending debounce
-      // timer and the hydrate guard — the manual rmSync below can't do those.
-      wipeDisk();
-      // Wipe the test S3 + DynamoDB disk dirs so hydration sees a clean slate
-      try { rmSync(TEST_S3_ROOT, { recursive: true, force: true }); } catch {}
-      try { rmSync(TEST_DDB_ROOT, { recursive: true, force: true }); } catch {}
-      mkdirSync(TEST_S3_ROOT, { recursive: true });
-      mkdirSync(TEST_DDB_ROOT, { recursive: true });
-    },
-    close() { stopBackground(); return new Promise(resolve => server.close(resolve)); },
-  };
 }
